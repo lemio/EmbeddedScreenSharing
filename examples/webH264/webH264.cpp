@@ -46,7 +46,7 @@ const char password[100] = "|*P*|";
 const char mdnsName[100] = "esp-webh264";
 
 // Shown as a QR code so the user can find help/docs if WiFi connection fails
-const char githubRepoUrl[] = "https://github.com/lemio/LilyGo-AMOLED-WebJPEG";
+const char githubRepoUrl[] = "https://github.com/lemio/EmbeddedScreenSharing";
 
 LilyGo_Class amoled;
 
@@ -232,7 +232,7 @@ static void setupWebServer() {
     // Redirect to the HTTPS-hosted copy of the streaming page on GitHub Pages - see
     // examples/webJPEG/webJPEG.cpp for why (getDisplayMedia() needs a secure context).
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-        String url = "https://lemio.github.io/LilyGo-AMOLED-WebJPEG/stream.html?espAddress=http://" + request->host();
+        String url = "https://lemio.github.io/EmbeddedScreenSharing/stream.html?espAddress=http://" + request->host();
         request->redirect(url);
     });
 

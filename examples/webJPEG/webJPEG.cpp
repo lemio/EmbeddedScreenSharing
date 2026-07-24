@@ -34,7 +34,7 @@ const char password[100] = "|*P*|";
 const char mdnsName[100] = "esp-webjpeg";
 
 // Shown as a QR code so the user can find help/docs if WiFi connection fails
-const char githubRepoUrl[] = "https://github.com/lemio/LilyGo-AMOLED-WebJPEG";
+const char githubRepoUrl[] = "https://github.com/lemio/EmbeddedScreenSharing";
 
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");          // color images
@@ -450,7 +450,7 @@ void setupWebServer() {
     // for the WebSocket connection back to this device, since it's ws:// not wss://).
     // This same page also serves webH264 - see examples/stream.html.
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-        String url = "https://lemio.github.io/LilyGo-AMOLED-WebJPEG/stream.html?espAddress=http://" + request->host();
+        String url = "https://lemio.github.io/EmbeddedScreenSharing/stream.html?espAddress=http://" + request->host();
         request->redirect(url);
     });
 
