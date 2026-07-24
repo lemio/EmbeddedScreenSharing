@@ -28,7 +28,7 @@ examples:
       Streams a browser tab, camera, or screen share to the AMOLED display over WiFi as
       MJPEG frames. Auto-detects the attached panel at boot, so this one firmware works
       on the 1.47" Lite, 1.91", and 2.41"/T4-S3 T-Display AMOLED boards.
-    sourceUrl: https://github.com/lemio/LilyGo-AMOLED-WebJPEG/tree/main/examples/webJPEG
+    sourceUrl: https://github.com/lemio/EmbeddedScreenSharing/tree/main/examples/webJPEG
     variables:
       - firmware_name: "|*S*|"
         readable_name: WiFi Name (SSID)
@@ -51,7 +51,7 @@ examples:
       in-browser with WebCodecs and decoded on-device. Sharper image and much lower
       bandwidth than WebJPEG at the same quality, at the cost of a slower decoder
       (roughly 3-5fps). T4-S3 (2.41", 600x450) only.
-    sourceUrl: https://github.com/lemio/LilyGo-AMOLED-WebJPEG/tree/main/examples/webH264
+    sourceUrl: https://github.com/lemio/EmbeddedScreenSharing/tree/main/examples/webH264
     hardware: T4-S3
     variables:
       - firmware_name: "|*S*|"

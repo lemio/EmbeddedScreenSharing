@@ -1,7 +1,7 @@
-<h1 align = "center">LilyGo-AMOLED-WebJPEG</h1>
+<h1 align = "center">EmbeddedScreenSharing</h1>
 <p align="center"><i>Use a LilyGo AMOLED display as an external monitor for prototyping</i></p>
 
-[![PlatformIO CI](https://github.com/lemio/LilyGo-AMOLED-WebJPEG/actions/workflows/platformio.yml/badge.svg)](https://github.com/lemio/LilyGo-AMOLED-WebJPEG/actions/workflows/platformio.yml)
+[![PlatformIO CI](https://github.com/lemio/EmbeddedScreenSharing/actions/workflows/platformio.yml/badge.svg)](https://github.com/lemio/EmbeddedScreenSharing/actions/workflows/platformio.yml)
 
 ## What this is
 
@@ -70,7 +70,7 @@ https://github.com/user-attachments/assets/d4254f9d-f0c3-4d79-989b-088d2321c415
 
 
 No PlatformIO install needed. Every push to `main` builds and publishes ready-to-flash
-firmware at the [browser flasher](https://lemio.github.io/LilyGo-AMOLED-WebJPEG/wizard.html):
+firmware at the [browser flasher](https://lemio.github.io/EmbeddedScreenSharing/wizard.html):
 
 1. Open that link in Chrome or Edge (Web Serial support is required).
 2. Pick WebJPEG or WebH264 (see the comparison table above).
