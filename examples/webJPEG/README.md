@@ -93,8 +93,10 @@ please open an issue with a serial log from just before it happens.
    and the display itself shows a connection spinner, then the IP address and mDNS
    hostname once WiFi connects (see the root README's "Setup flow" section - this is
    identical to webH264's).
-2. Visit `http://<that address>` (or `http://esp-webjpeg.local`, unless you set a
-   different mDNS hostname). The board doesn't serve the streaming page itself - it
+2. Visit `http://<that address>` (or `http://esp-screen.local`, unless you set a
+   different mDNS hostname - every example in this repo shares that same default now,
+   so set a custom one via the browser flasher if running more than one of these
+   boards on the same network). The board doesn't serve the streaming page itself - it
    302-redirects you to the HTTPS copy of [stream.html](../stream.html) hosted on GitHub
    Pages, pre-filling the `espAddress` field with the board's address and detecting that
    this is a webJPEG board. See the root README's "Why the redirect" section for why,

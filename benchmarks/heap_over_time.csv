@@ -1,0 +1,10 @@
+run_id,board,protocol,ack_mode,elapsed_s,free_heap_bytes,frames_rendered_so_far
+webRAW-CYD_capture3_after_fix,CYD ESP32-2432S028R,raw,wait,30,87968,173
+webRAW-CYD_capture3_after_fix,CYD ESP32-2432S028R,raw,wait,60,84808,552
+webRAW-CYD_capture3_after_fix,CYD ESP32-2432S028R,raw,wait,90,84652,914
+webRAW-CYD_capture3_after_fix,CYD ESP32-2432S028R,raw,wait,120,88176,1315
+webRAW_amoled_immediate,"LilyGo T-Display AMOLED 1.91""",raw,immediate,0,234708,869
+webRAW_amoled_immediate,"LilyGo T-Display AMOLED 1.91""",raw,immediate,30,234972,1213
+webRAW_amoled_wait,"LilyGo T-Display AMOLED 1.91""",raw,wait,0,234204,2361
+webRAW_amoled_wait,"LilyGo T-Display AMOLED 1.91""",raw,wait,30,235108,2659
+webRAW_amoled_wait,"LilyGo T-Display AMOLED 1.91""",raw,wait,60,234908,2931

@@ -1,6 +1,11 @@
 .pio
 .DS_Store
 
+# Local WiFi credentials for examples that need real credentials to build/test locally
+# outside the browser flasher's own patching step (webJPEG-CYD, webRAW-CYD, webRAW) -
+# see any of those examples' wifi_credentials.h.example for the format.
+wifi_credentials.h
+
 # ESP-IDF (examples/webH264's [env:webH264]) build/dependency artifacts.
 # sdkconfig.defaults is the checked-in seed config; sdkconfig.<env> is generated
 # from it plus ESP-IDF's own defaults on every build. dependencies.lock (IDF

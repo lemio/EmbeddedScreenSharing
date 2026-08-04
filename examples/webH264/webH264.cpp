@@ -40,13 +40,24 @@ extern "C" {
 // WiFi credentials. ssid/password have no sensible default (must be set via the browser
 // flasher or before compiling) - see examples/webJPEG/webJPEG.cpp for the full
 // explanation of this placeholder convention. mdnsName's default value is itself both a
-// working hostname AND the flasher's search key, matching webJPEG's convention.
+// working hostname AND the flasher's search key, matching webJPEG's convention - see
+// that file for why it's the same shared "esp-screen" default across every example in
+// this repo now, not a per-firmware name.
 const char ssid[100] = "|*S*|";
 const char password[100] = "|*P*|";
-const char mdnsName[100] = "esp-webh264";
+const char mdnsName[100] = "esp-screen";
 
 // Shown as a QR code so the user can find help/docs if WiFi connection fails
 const char githubRepoUrl[] = "https://github.com/lemio/EmbeddedScreenSharing";
+
+// Shown on-device (WiFi connect/connected screens) - see webJPEG.cpp's identical
+// FW_VARIANT/buildDateString() for the full explanation.
+#define FW_VARIANT "WebH264"
+String buildDateString() {
+    String d = __DATE__;
+    d.replace("  ", " ");
+    return d;
+}
 
 LilyGo_Class amoled;
 
@@ -129,6 +140,10 @@ static void setupWiFi() {
         statusSpr.fillSprite(TFT_BLACK);
         statusSpr.setTextDatum(TC_DATUM);
 
+        // See webJPEG.cpp's identical line for why this is here.
+        statusSpr.setTextColor(TFT_DARKGREY, TFT_BLACK);
+        statusSpr.drawString(String(FW_VARIANT) + "  " + buildDateString(), DISPLAY_WIDTH / 2, 4, 1);
+
         statusSpr.setTextColor(TFT_WHITE, TFT_BLACK);
         statusSpr.drawString("Connecting to WiFi", DISPLAY_WIDTH / 2, DISPLAY_HEIGHT * 0.10, 2);
 
@@ -172,6 +187,8 @@ static void setupWiFi() {
 
         statusSpr.fillSprite(TFT_BLACK);
         statusSpr.setTextDatum(TC_DATUM);
+        statusSpr.setTextColor(TFT_DARKGREY, TFT_BLACK);
+        statusSpr.drawString(String(FW_VARIANT) + "  " + buildDateString(), DISPLAY_WIDTH / 2, 4, 1);
         statusSpr.setTextColor(TFT_GREEN, TFT_BLACK);
         statusSpr.drawString("WiFi Connected", DISPLAY_WIDTH / 2, DISPLAY_HEIGHT * 0.08, 2);
         statusSpr.setTextColor(TFT_WHITE, TFT_BLACK);

@@ -286,6 +286,260 @@ how the ESP32's task scheduling and TCP's RTO backoff both work, not a verified 
 cause. The next real log will show whether `Recv=` (not `Total=`) is where the gap time
 actually lives, and whether the periodic yield changed anything.
 
+## Adding a board outside the AMOLED lineup (webJPEG-CYD)
+
+**Check the actual decoder library's supported targets before assuming a codec choice
+is portable.** Asked to port webH264 to a "Cheap Yellow Display" (ESP32-2432S028R -
+plain ESP32, not S3), the real blocker wasn't the obvious one (no PSRAM - see below),
+it was structural: `managed_components/espressif__esp_h264/idf_component.yml` lists
+`targets: [esp32s3, esp32s31, esp32p4]`, and there's no `esp32/` folder at all under its
+prebuilt `sw/libs/` (only `esp32s3`, `esp32s31`, `esp32p4` exist there as prebuilt
+`libtinyh264.a`/`libopenh264.a`). Espressif simply never built this component for the
+original ESP32 chip. No amount of memory tuning or build-flag rework changes that - it
+was worth checking the vendored component's own manifest directly (two minutes) before
+spending real implementation time on a path that couldn't work regardless. webJPEG has
+no such restriction (`JPEGDecoder` is a portable C library), so that's what
+webJPEG-CYD is built on instead.
+
+**No PSRAM changes which architecture is "correct," not just the numbers.**
+`examples/webJPEG/webJPEG.cpp`'s AMOLED port deliberately moved *away* from per-MCU
+direct-to-display rendering, toward buffering a full frame in a `TFT_eSprite` before
+one bulk push (see "webJPEG's cheap decode doesn't mean a faster overall pipeline"
+above) - that fix was correct there, backed by real measurement, and shouldn't be
+second-guessed for that board. But the CYD has no PSRAM at all, and that same sprite
+would be ~150KB - a large fraction of the entire ~320KB internal-SRAM budget once
+WiFi/BT/FreeRTOS/Arduino overhead is accounted for. Porting the "improved" architecture
+byte-for-byte would have been copying a conclusion without its premise: the earlier fix
+was worth ~150KB of PSRAM (abundant, 8MB) to save render time; on a board where that
+150KB is a large fraction of all available memory, the trade inverts. webJPEG-CYD goes
+back to direct-to-display per-MCU pushes on purpose - the same visible top-to-bottom
+render artifact the AMOLED boards fixed, deliberately reintroduced, because the
+resource that fix spent (RAM) is the scarce one here and the resource it saved (render
+time) is comparatively cheap to give back. Lesson: a performance fix is really "spend
+resource X to save resource Y" - re-examine that trade on hardware where X and Y have
+different relative scarcity, don't just port the conclusion.
+
+**`-DARDUINO_USB_CDC_ON_BOOT=1` on a plain ESP32 doesn't just do nothing - it deletes
+`Serial`.** This repo's shared `[env]` sets that flag because every other board here is
+an ESP32-S3 with native USB, where it controls whether `Serial` is the USB-CDC object
+or the native UART. A plain ESP32 has no native USB peripheral at all (Serial always
+goes over its UART-to-USB bridge chip, unaffected by this flag on real hardware) - but
+leaving the flag defined anyway made the Arduino core's conditional compilation skip
+defining the global `Serial` object entirely, turning every `Serial.print()` call in
+the file into a hard compile error ("'Serial' was not declared in this scope").
+`[env:webJPEG-CYD]` undoes it with `-UARDUINO_USB_CDC_ON_BOOT`. Caught immediately by
+the first build attempt, not something that needed real hardware to find - a reminder
+to actually build a new env early, not just read through the config and assume it's
+fine because it "shouldn't matter" for a flag that looks S3-specific.
+
+**Real hardware found four more things no amount of reading the datasheet would have:**
+
+1. **"Free enough in total" isn't "free enough to allocate."** The board's boot-time
+   log showed 302,844 bytes free before this example's three fixed frame buffers -
+   comfortably more than the 192KB a 64KB `MAX_FRAME_SIZE` would need. That allocation
+   *still failed*. The problem was never total free memory, it was the largest single
+   *contiguous* block - something in Arduino core/TFT_eSPI init had already carved the
+   heap into pieces smaller than 64KB, even this early in `setup()`. 40KB succeeded
+   (120KB total, 179,916 bytes free afterward). Lesson: a "free heap" number on its own
+   doesn't tell you what a single large `malloc()` can get away with; test the actual
+   allocation size on real hardware, don't just check that the sum looks big enough.
+
+2. **A slower upload speed made a CH340 upload *less* reliable, not more.** Intuition
+   says "if uploads are failing, slow down" - the opposite was true here. 115200 baud
+   reliably died partway through the ~900KB firmware write (8 consecutive real-hardware
+   attempts, unaffected by trying a different USB port or a different physical cable -
+   both were ruled out one at a time). 460800 completed cleanly, repeatedly, and about
+   4x faster. Root cause unconfirmed (a CH340 driver/timing quirk at low baud seems
+   likeliest, given cable and port were both eliminated as variables), but the fix was
+   simple once tested empirically rather than assumed: `upload_speed = 460800` in
+   `[env:webJPEG-CYD]`. Lesson: "make it more conservative" is not a safe default
+   troubleshooting move without evidence - it happened to make this specific failure
+   mode worse, and the only way to find that out was to actually try the opposite.
+
+3. **`setRotation()` isn't guaranteed to work just because TFT_eSPI compiles for the
+   driver.** `tft.setRotation(1)` (landscape) produced portrait-oriented content with a
+   corrupted "noise" band at the bottom - a real, board-specific ILI9341/TFT_eSPI
+   incompatibility, not a config typo (pin mapping, SPI frequency, and rotation 0 all
+   work fine on the same board). The pragmatic fix was to stop asking the panel to
+   rotate at all: boot into rotation 0 and use `stream.html`'s browser-side Rotation
+   feature (added earlier this session for sideways-mounted displays) to get
+   landscape content onto it instead - built for exactly this kind of situation, a
+   display that can't or won't rotate itself, even though it was originally motivated
+   by AMOLED boards that rotate fine in firmware. **Update, see item 6 below:** the
+   width/height mismatch this investigation kept running into at every rotation value
+   (0 included) turned out to be a *different* bug than "this driver can't rotate" -
+   TFT_eSPI's own internal `_width`/`_height` for this driver ignore build-flag
+   overrides entirely, no matter the rotation. Rotation 0 was still the right choice
+   (rotation 1 really is broken on this panel), but it wasn't sufficient on its own.
+
+4. **A flicker "obviously" required a framebuffer to fix - it didn't.** The WiFi-connect
+   spinner redrew the *entire* screen every 500ms (`fillScreen(BLACK)` then redraw
+   everything), which is fine when going through a sprite buffer (the AMOLED boards'
+   approach) but produces a visible black flash every tick when drawing directly to the
+   panel, which this board does by necessity (see the "no PSRAM" entry above). The fix
+   wasn't to add a framebuffer back (defeating the whole point of removing it) - it was
+   to stop redrawing the *static* parts (labels, SSID text, the progress bar's outline)
+   at all, and only touch the two things that actually change per tick (the spinner
+   character, the progress bar's fill), relying on opaque-background text/fills to
+   overwrite the previous frame in place. Same lesson as the AMOLED sprite fix, in
+   miniature: figure out what actually needs to be cheap to redraw before reaching for
+   a bigger structural fix.
+
+5. **A test observation phrased as a shape ("only covers part of the screen") is easy
+   to mis-diagnose as a rotation/geometry problem when it's actually a value silently
+   not applying at all.** The numbered-grid diagnostic (labeled gridlines instead of a
+   plain border, so results could be read out as concrete numbers) was what finally
+   separated "this rotation is geometrically wrong" from "this rotation is
+   geometrically right but capped at a fixed limit regardless of what's requested" -
+   the latter was the real bug (item 6), and no amount of trying different
+   `setRotation()` values could have found it, because none of them were the actual
+   cause.
+
+6. **`TFT_eSPI(width, height)`'s constructor argument overrides the driver's internal
+   state; `-DTFT_WIDTH=`/`-DTFT_HEIGHT=` build flags don't, for this driver.**
+   `ILI9341_Defines.h` hardcodes `TFT_WIDTH`/`TFT_HEIGHT` per rotation-swap case
+   regardless of any build-flag override, so `-DTFT_WIDTH=320 -DTFT_HEIGHT=240` was a
+   silent no-op the whole time (confirmed: changing it produced literally zero change
+   in what `tft.width()` reported). The fix that actually worked -
+   `TFT_eSPI tft = TFT_eSPI(WIDTH, HEIGHT);` - passes dimensions to the constructor,
+   which sets the driver instance's `_width`/`_height` directly, bypassing the
+   compile-time logic entirely. Lesson: TFT_eSPI has (at least) two different
+   "configure the display size" mechanisms with different scopes, and this driver
+   silently prefers its own hardcoded values over the build-flag one - a working
+   third-party example ("just add `-DTFT_WIDTH=`") turned out not to transfer to this
+   driver/version combination without checking the actual driver source.
+
+7. **A `-D` build flag set to the wrong *kind* of value fails silently, not loudly.**
+   `TFT_RGB_ORDER` looked like it should take a symbolic constant (`TFT_BGR`/`TFT_RGB`,
+   the names TFT_eSPI itself defines for the resulting MADCTL bits) - so
+   `-DTFT_RGB_ORDER=TFT_BGR` looked correct and compiled without any warning. It
+   wasn't: `ILI9341_Defines.h` checks `#if (TFT_RGB_ORDER == 1)`, i.e. it wants the
+   literal integer `1` for RGB order, anything else (including an undefined
+   identifier like `TFT_BGR`, which the preprocessor treats as `0` inside `#if`)
+   falls through to the `#else` - which is BGR, the same result as not setting the
+   flag at all. Every real-hardware color report ("red shows as blue", "yellow shows
+   as light blue", "blue shows as brown" - all consistent with a straight R/B channel
+   swap) was the same symptom before and after this "fix," which in hindsight was the
+   tell. The actual fix was a one-character change, `-DTFT_RGB_ORDER=1`. Lesson: a
+   `-D` flag that compiles clean is not evidence it did anything - `#if`/`#ifdef`
+   conditions on flags with non-obvious expected value types (integer vs. symbol vs.
+   presence-only) are exactly the kind of bug that survives a successful build and
+   only shows up as a confusing runtime symptom that can look like something else
+   entirely (this one was first mistaken for a gamma/noise problem).
+
+## webRAW-CYD (raw RGB565 + browser-side deflate, skipping JPEG entirely)
+
+**A `tinfl_decompress_mem_to_mem()` call overflowed the default Arduino loop task
+stack - a stack problem that looked, from the crash log alone, like it could have
+been anything.** webRAW-CYD decompresses ESP32-ROM-provided deflate streams
+(`esp32/rom/miniz.h` - no external library needed, confirmed linking on real
+hardware with zero extra dependencies) directly into a per-strip buffer. First real
+test crashed instantly on the first received frame: `Stack canary watchpoint
+triggered (loopTask)`, inside `tinfl_decompress_mem_to_mem()` itself. The function's
+internal `tinfl_decompressor` state - three `tinfl_huff_table`s, each holding a
+1024-entry lookup table plus a 288-entry Huffman tree - is ~10.7KB by itself, declared
+as a local (stack) variable *inside the ROM function*, not the heap. Arduino's default
+`loopTask` stack is 8KB. Fixed with one build flag,
+`-DARDUINO_LOOP_STACK_SIZE=32768` (see `main.cpp`'s `ARDUINO_LOOP_STACK_SIZE`/
+`CONFIG_ARDUINO_LOOP_STACK_SIZE` `#ifndef` chain for where that's read). Lesson:
+a large stack-resident struct inside a library/ROM function you didn't write and
+can't see the source of is invisible until it overflows - the crash symptom (a canary
+watchpoint on a specific task) was the actual useful clue, not the fact that it
+happened inside a decompress call.
+
+**Fewer, bigger display pushes really did win big - confirmed, not just
+theorized.** webJPEG-CYD's own real-hardware numbers (see its section above) showed
+JPEG's per-MCU-block `pushImage()` calls, not pixel count, dominating render time
+(~150-250ms). Once the stack crash above was fixed, webRAW-CYD's decompress+push for
+a whole 320x240 frame (10 strips, 10 `pushImage()` calls) measured ~40-44ms on the
+same board - a 4-6x improvement, and every strip decompressed cleanly (0 failures).
+This wasn't a lucky guess dressed up as a hypothesis after the fact - it was
+predicted in the file header comment before the first real-hardware test, from the
+JPEG measurements alone, and the prediction held.
+
+**Streams API objects being partly native-backed means "reduce the call rate" and
+"the code is correct" can both be true while memory still balloons.** Real-hardware
+testing (well, real-*browser* testing - the memory problem was client-side, not on
+the ESP32) hit a runaway ~50GB Chrome memory footprint. The proximate cause was an
+uncontrolled loop: with no rate limiting, `sendRawFrame()`'s scheduling could fire far
+faster than the intended Frame Rate setting (the device's own serial log showed
+frames arriving ~7-10ms apart - roughly 100-140/sec, not the handful/sec a "Frame
+Rate: 6" setting implies), each call constructing 10 fresh
+`CompressionStream`/`ReadableStream` pairs (one per strip) plus a fresh
+300KB-ish `ImageData`. None of that is a classic reference leak - nothing was being
+retained past its natural scope - but `CompressionStream` and friends carry real
+non-JS-heap state (internal buffering, native stream controllers) that V8's garbage
+collector doesn't schedule around the same way it does plain JS object pressure, so
+allocation rate can outpace reclaim rate even for "correct" code. Three separate
+fixes, each addressing a different layer of the same problem: a re-entrancy guard
+(`rawSending`) so overlapping executions can never compound; a hard floor
+(`RAW_MIN_FRAME_DELAY_MS`) under the computed frame delay so a bad/extreme Frame Rate
+input can't collapse toward a near-0ms loop; and cutting incidental per-frame
+allocation that had nothing to do with the rate at all - `canvas.width`/`height` were
+being reassigned every frame despite never changing (forces a full backing-store
+reallocation on every assignment, regardless of whether the value differs), and
+`deflateRaw()` was wrapping each strip's output in `new Response(...).arrayBuffer()`
+instead of reading `cs.readable` directly, adding one more heavier object per strip
+for no benefit. Lesson: when a "just cap the rate" fix doesn't feel sufficient on its
+own for an API with real native-side cost, look for allocations that are happening on
+every call regardless of rate, not just ones gated by it - the canvas resize matched
+that description exactly.
+
+## Capture resolution and rotation blur (stream.html)
+
+**A blurry *preview* pointed at the capture request, not the canvas/rotation code -
+and that separation of symptoms was the fastest way to the real bug.** The `<video>`
+preview element renders the raw MediaStream directly; it never passes through
+`drawRotatedFrame()` or any other canvas code (only the hidden send-canvas does). So
+"even the unrotated preview looks blurry" ruled out the rotation transform as the
+*primary* cause before any real hardware/browser testing was needed - it had to be
+something upstream of all our drawing code, in the capture itself.
+
+**Requesting `getDisplayMedia`'s `width`/`height` `ideal` constraints set directly to
+a device's tiny, unusually-shaped target resolution triggers a real Chrome tab-capture
+bug.** All three pipelines (JPEG, H264, RAW) used to request capture at exactly the
+target device resolution (e.g. 536x240 - a 2.23:1 aspect ratio, wider-and-shorter than
+any normal browser tab). Verbose logging of `track.getSettings()` alongside the
+*actual* decoded `video.videoWidth`/`videoHeight` (plus a `resize` event listener and
+delayed re-checks, to rule out a transient early frame settling later) showed a
+persistent, stable mismatch on real hardware: `getSettings()` confidently reported the
+full requested 536x240 the entire time, while the video element actually decoded only
+106x240 - not a proportional downscale (which would preserve the 2.23:1 aspect ratio),
+but a squashed, effectively-portrait 0.44:1 shape. Ruled out both plausible mundane
+causes before concluding it was a browser bug: confirmed via a follow-up question that
+the shared tab's window was maximized/full-width (not a small floating window), and
+confirmed the shared tab wasn't this same page with DevTools docked into it (which
+would have shrunk this page's own viewport and explained a narrow capture
+legitimately). With a normal-sized window and unrelated tab content, an extreme
+requested aspect ratio was the only variable left, and it was the same variable that
+was already known-unusual (this repo's target displays are far wider-and-shorter than
+typical screen content). The fix: stop asking Chrome to crop-and-scale into that odd
+shape at all. Request a generous, ordinary-aspect-ratio capture instead (1920x1080,
+`CAPTURE_IDEAL_WIDTH`/`HEIGHT` in stream.html), and let this page's own canvas step -
+already resizing into the exact device resolution via `drawImage()`'s target
+width/height regardless of source shape, needed anyway for the rotation transform -
+do 100% of the actual resize instead of trusting Chrome's scaler for an aspect ratio
+it mishandles. Lesson: when a platform API's own "what did you give me" accessor
+(`getSettings()`) and the actual delivered data disagree and *stay* disagreeing (not a
+one-time startup race - checked via a `resize` listener plus delayed re-reads, not
+just a single reading), stop trusting that accessor for this API/parameter combination
+entirely rather than trying to reconcile the two readings.
+
+**`imageSmoothingEnabled` defaults to `true` and blurs *any* transformed
+`drawImage()` call, including a pure 90/180/270deg rotation - a real, separate
+contributor, just not the dominant one in this investigation.** `ctx.rotate(Math.PI/2)`
+doesn't land on exact integer source coordinates in floating point, so even a
+same-resolution rotated source gets bilinear-blended with its neighbors instead of
+copied pixel-for-pixel. Fixed by setting `ctx.imageSmoothingEnabled = false` in
+`drawRotatedFrame()` before any of the rotation cases. This fix is still correct and
+still shipped - multiples of 90 degrees should always be an exact nearest-neighbor
+copy - it just turned out to be secondary to the capture-resolution bug above for the
+specific "very blurry" report that prompted investigating in the first place. Lesson:
+two real bugs can contribute to one reported symptom; fixing the first one you find
+(and confirming it's real) doesn't mean the report is fully explained - "that is a lot
+better" after the *second* fix (the capture resolution one) is what actually confirmed
+the investigation was complete, not either fix in isolation.
+
 ## General
 
 **Comments should describe the code as it is, not the story of how it got there.**

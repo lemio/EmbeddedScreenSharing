@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ESP32 AMOLED Video Stream</title>
+    <title>ESP32 Display Video Stream</title>
     <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -117,10 +117,12 @@
         }
         .variant-jpeg { background: #2196F3; }
         .variant-h264 { background: #9c27b0; }
+        .variant-raw { background: #ff5722; }
         .variant-unknown { background: #666; }
-        .mode-jpeg-only, .mode-h264-only { display: none; }
+        .mode-jpeg-only, .mode-h264-only, .mode-raw-only { display: none; }
         body.mode-jpeg .mode-jpeg-only { display: block; }
         body.mode-h264 .mode-h264-only { display: block; }
+        body.mode-raw .mode-raw-only { display: block; }
         .hint {
             font-size: 12px;
             color: #999;
@@ -130,8 +132,8 @@
 </head>
 <body>
     <div class="container">
-        <h1>ESP32 AMOLED Video Stream</h1>
-        <p>Stream a browser tab, window, or camera to your LilyGo AMOLED board over WiFi
+        <h1>ESP32 Display Video Stream</h1>
+        <p>Stream a browser tab, window, or camera to your ESP32 display board over WiFi
             <span id="variantBadge" class="variant-badge variant-unknown">detecting...</span></p>
 
         <div class="config">
@@ -146,6 +148,7 @@
                     <option value="auto" selected>Auto-detect (recommended)</option>
                     <option value="jpeg">Force WebJPEG</option>
                     <option value="h264">Force WebH264</option>
+                    <option value="raw">Force WebRAW (CYD/AMOLED, experimental)</option>
                 </select>
             </div>
             <div class="hint" id="modeHint">Enter the address above - the page will detect which firmware is running and show the matching options below.</div>
@@ -168,6 +171,7 @@
                         <option value="536x240" selected>536x240 (1.91" AMOLED)</option>
                         <option value="450x600">450x600 (2.41" AMOLED)</option>
                         <option value="194x368">194x368 (1.47" AMOLED)</option>
+                        <option value="320x240">320x240 (2.8" CYD)</option>
                         <option value="custom">Custom...</option>
                     </select>
                 </div>
@@ -192,6 +196,17 @@
                         Monochrome Mode (faster, smaller files)
                     </label>
                 </div>
+                <div>
+                    <label>Ack Mode:</label>
+                    <select id="jpegAckMode">
+                        <option value="immediate" selected>Immediate - send at Frame Rate, ignore device</option>
+                        <option value="wait">Wait for device ack - flow-controlled</option>
+                    </select>
+                </div>
+                <div class="hint">"Wait for device ack" only sends the next frame once the device
+                    confirms it's done with the last one - avoids wasting encode/network work on
+                    frames the device would just drop. Frame Rate becomes a ceiling rather than a
+                    fixed rate in this mode.</div>
             </div>
 
             <div class="mode-h264-only">
@@ -237,6 +252,29 @@
                         <option value="screen" selected>Screen Share</option>
                     </select>
                 </div>
+            </div>
+
+            <div class="mode-raw-only">
+                <div>
+                    <label>Resolution:</label>
+                    <span id="rawResolutionLabel">detecting...</span>
+                </div>
+                <div>
+                    <label>Frame Rate (FPS):</label>
+                    <input type="number" id="rawFrameRateInput" value="6" min="1" max="30">
+                </div>
+                <div>
+                    <label>Ack Mode:</label>
+                    <select id="rawAckMode">
+                        <option value="immediate" selected>Immediate - send at Frame Rate, ignore device</option>
+                        <option value="wait">Wait for device ack - flow-controlled</option>
+                    </select>
+                </div>
+                <div class="hint">Screen share only (no webcam). Raw RGB565 pixels, deflate-compressed in
+                    the browser - lossless, no JPEG artifacts, but a bigger payload than JPEG unless the
+                    content compresses well (flat UI/screen content usually does). Experimental - works on
+                    both the CYD (examples/webRAW-CYD) and the AMOLED lineup (examples/webRAW); see
+                    whichever README matches your board.</div>
             </div>
         </div>
 
@@ -299,6 +337,7 @@
         const customWidthInput = document.getElementById('customWidth');
         const customHeightInput = document.getElementById('customHeight');
         const monoModeCheckbox = document.getElementById('monoMode');
+        const jpegAckModeSelect = document.getElementById('jpegAckMode');
 
         // ---- H264-mode DOM refs ----
         const h264FpsInput = document.getElementById('h264FpsInput');
@@ -307,9 +346,13 @@
         const maxInFlightSelect = document.getElementById('maxInFlightSelect');
         const ignoreAcksCheckbox = document.getElementById('ignoreAcksCheckbox');
 
+        // ---- RAW-mode DOM refs ----
+        const rawFrameRateInput = document.getElementById('rawFrameRateInput');
+        const rawAckModeSelect = document.getElementById('rawAckMode');
+
         let streaming = false;
-        let activeMode = null; // 'jpeg' or 'h264' - which pipeline is actually running
-        let detectedVariant = null; // 'jpeg' | 'h264' | null (detection not yet succeeded)
+        let activeMode = null; // 'jpeg', 'h264', or 'raw' - which pipeline is actually running
+        let detectedVariant = null; // 'jpeg' | 'h264' | 'raw' | null (detection not yet succeeded)
         // webH264's actual panel resolution, from /boardinfo - it auto-detects its
         // attached panel just like webJPEG does, so this isn't a fixed constant.
         // 600x450 (T4-S3) is only a fallback for before detection succeeds.
@@ -329,15 +372,18 @@
 
         function applyModeUI() {
             const mode = effectiveMode();
-            document.body.classList.remove('mode-jpeg', 'mode-h264');
+            document.body.classList.remove('mode-jpeg', 'mode-h264', 'mode-raw');
             if (mode === 'jpeg') {
                 document.body.classList.add('mode-jpeg');
             } else if (mode === 'h264') {
                 document.body.classList.add('mode-h264');
+            } else if (mode === 'raw') {
+                document.body.classList.add('mode-raw');
             }
 
             if (detectedVariant) {
-                variantBadge.textContent = detectedVariant === 'jpeg' ? 'WebJPEG detected' : 'WebH264 detected';
+                const variantLabels = { jpeg: 'WebJPEG detected', h264: 'WebH264 detected', raw: 'WebRAW detected' };
+                variantBadge.textContent = variantLabels[detectedVariant] || (detectedVariant + ' detected');
                 variantBadge.className = 'variant-badge variant-' + detectedVariant;
             } else {
                 variantBadge.textContent = 'not detected';
@@ -367,7 +413,7 @@
                 const response = await fetch(espAddress + '/boardinfo');
                 if (!response.ok) return false;
                 const boardInfo = await response.json();
-                detectedVariant = (boardInfo.variant === 'h264') ? 'h264' : 'jpeg';
+                detectedVariant = (boardInfo.variant === 'h264') ? 'h264' : (boardInfo.variant === 'raw') ? 'raw' : 'jpeg';
 
                 if (detectedVariant === 'jpeg' && boardInfo.width && boardInfo.height) {
                     const detectedSize = `${boardInfo.width}x${boardInfo.height}`;
@@ -381,10 +427,22 @@
                         customHeightInput.value = boardInfo.height;
                         customSizeDiv.style.display = 'block';
                     }
+                    // Older firmware won't send this field - fall back to the AMOLED
+                    // boards' generous 512KB rather than a size that could falsely
+                    // reject frames a real device would happily accept.
+                    jpegMaxFrameSize = boardInfo.maxFrameSize || 512 * 1024;
                 } else if (detectedVariant === 'h264' && boardInfo.width && boardInfo.height) {
                     h264DetectedWidth = boardInfo.width;
                     h264DetectedHeight = boardInfo.height;
                     document.getElementById('h264ResolutionLabel').textContent = `${h264DetectedWidth}x${h264DetectedHeight} (auto-detected)`;
+                } else if (detectedVariant === 'raw' && boardInfo.width && boardInfo.height) {
+                    // Fixed by the device's own decode buffers (see webRAW-CYD.cpp) -
+                    // not user-editable, same reasoning as webH264's Resolution field.
+                    rawWidth = boardInfo.width;
+                    rawHeight = boardInfo.height;
+                    rawStripRows = boardInfo.stripRows || rawStripRows;
+                    rawMaxFrameSize = boardInfo.maxFrameSize || rawMaxFrameSize;
+                    document.getElementById('rawResolutionLabel').textContent = `${rawWidth}x${rawHeight} (auto-detected)`;
                 }
 
                 console.log('Detected board:', boardInfo);
@@ -415,6 +473,22 @@
             return parseInt(rotationSelect.value, 10) || 0;
         }
 
+        // Real-hardware finding: requesting getDisplayMedia's width/height `ideal`
+        // constraints set directly to a device's tiny, unusually-shaped target
+        // resolution (e.g. 536x240, a 2.23:1 aspect ratio - wider-and-shorter than any
+        // normal browser tab) triggers a Chrome tab-capture bug where the actually
+        // decoded video comes out a fraction of the requested width (observed: 106px
+        // instead of 536px, on a maximized/full-width shared tab - not a window-size
+        // problem, and track.getSettings() disagreed with the real decoded size the
+        // whole time it was live). The fix is to stop asking Chrome to crop-and-scale
+        // into that odd shape at all: request a normal, generous, ordinary-aspect-ratio
+        // capture size instead (Chrome handles this reliably), and let this page's own
+        // canvas step - which already resizes into the exact device resolution via
+        // drawImage()'s target width/height regardless of source shape - do that part
+        // instead of relying on Chrome's scaler for an aspect ratio it mishandles.
+        const CAPTURE_IDEAL_WIDTH = 1920;
+        const CAPTURE_IDEAL_HEIGHT = 1080;
+
         // Draws `source` (a <video> element or a captured VideoFrame - both are valid
         // CanvasImageSource) into ctx, rotated by rotationDeg, filling an
         // outW x outH canvas exactly. The device always receives a plain outW x outH
@@ -424,6 +498,17 @@
         // still be addressed as landscape on the wire.
         function drawRotatedFrame(ctx, source, outW, outH, rotationDeg) {
             ctx.save();
+            // Canvas 2D defaults imageSmoothingEnabled to true, which resamples (blurs)
+            // *any* transformed drawImage() call, including a pure 90/180/270deg
+            // rotation - ctx.rotate(Math.PI/2) doesn't land on exact integer source
+            // coordinates in floating point, so even a same-resolution source gets
+            // bilinear-blended with its neighbors instead of copied pixel-for-pixel.
+            // That's the "anti-aliasing after rotating, even though the resolution
+            // matches" symptom - not a capture/resolution bug, a resampling default
+            // that only bites once a transform (rotation) is involved. Disabling it
+            // makes every case here an exact nearest-neighbor copy, which is what a
+            // multiple-of-90-degrees rotation should always be.
+            ctx.imageSmoothingEnabled = false;
             switch (rotationDeg) {
                 case 90:
                     ctx.translate(outW, 0);
@@ -468,14 +553,20 @@
                 updateStatus('This browser lacks WebCodecs support (use a recent Chrome or Edge)', 'error');
                 return;
             }
+            if (mode === 'raw' && !('CompressionStream' in window)) {
+                updateStatus('This browser lacks CompressionStream support (use a recent Chrome, Edge, or Firefox)', 'error');
+                return;
+            }
 
             activeMode = mode;
             startBtn.disabled = true;
             stopBtn.disabled = false;
             if (mode === 'jpeg') {
                 await startJpegStreaming();
-            } else {
+            } else if (mode === 'h264') {
                 await startH264Streaming();
+            } else {
+                await startRawStreaming();
             }
         });
 
@@ -484,6 +575,8 @@
                 stopJpegStreaming();
             } else if (activeMode === 'h264') {
                 stopH264Streaming();
+            } else if (activeMode === 'raw') {
+                stopRawStreaming();
             }
             activeMode = null;
             applyModeUI();
@@ -495,6 +588,7 @@
 
         let frameCount = 0;
         let errorCount = 0;
+        let oversizedCount = 0;
         let totalDataSize = 0;
         let lastFrameTime = 0;
         let fpsHistory = [];
@@ -503,6 +597,24 @@
         const maxReconnectAttempts = 10;
         let reconnectDelay = 2000;
         let reconnectTimer = null;
+
+        // Largest JPEG the currently-connected device will actually accept (from
+        // /boardinfo's maxFrameSize - see detectBoardConfig()) - varies a lot by board
+        // (512KB on the PSRAM-backed AMOLED boards, 40KB on webJPEG-CYD's no-PSRAM
+        // fixed buffer). Encoding and sending a frame bigger than this just wastes
+        // browser CPU and network bandwidth on something the device will immediately
+        // drop - see sendJpegFrame()'s size check below.
+        let jpegMaxFrameSize = 512 * 1024;
+
+        // "Wait for device ack" flow control - see the Ack Mode option and
+        // webJPEG.cpp/webJPEG-CYD.cpp's client->text("a") for the device side. Mirrors
+        // webH264's h264InFlight pattern but only ever tracks one frame at a time
+        // (JPEG mode has no "frames in flight" setting) since JPEG has no encoder
+        // state to keep synchronized across multiple outstanding frames the way H.264
+        // does.
+        const JPEG_ACK_STALL_TIMEOUT_MS = 3000;
+        let jpegFrameInFlight = false;
+        let jpegFrameSentAt = 0;
 
         function getDisplayDimensions() {
             const sizeValue = displaySizeSelect.value;
@@ -575,6 +687,17 @@
                         attemptJpegReconnect();
                     }
                 };
+
+                // Any message from the device is an ack (client->text("a") in
+                // webJPEG.cpp/webJPEG-CYD.cpp) - only acted on when Ack Mode is "wait",
+                // but sent unconditionally by the device, so this just does nothing in
+                // "immediate" mode rather than needing the device to know which mode
+                // the browser is in.
+                ws.onmessage = () => {
+                    if (jpegAckModeSelect.value !== 'wait') return;
+                    jpegFrameInFlight = false;
+                    if (streaming) sendJpegFrame();
+                };
             });
         }
 
@@ -613,12 +736,17 @@
 
                 if (sourceType === 'screen') {
                     updateStatus('Requesting screen share...', 'info');
-                    const displayDims = getDisplayDimensions();
+                    const requestedFps = parseInt(frameRateInput.value) || 30;
+                    // See CAPTURE_IDEAL_WIDTH/HEIGHT's comment - requesting the tiny
+                    // device resolution (getDisplayDimensions()) directly here is what
+                    // triggered a Chrome tab-capture scaling bug; the actual device
+                    // resolution is applied in the canvas step (drawRotatedFrame) below
+                    // instead, from this normal-aspect-ratio capture.
                     stream = await navigator.mediaDevices.getDisplayMedia({
                         video: {
-                            width: { ideal: displayDims.width },
-                            height: { ideal: displayDims.height },
-                            frameRate: { ideal: parseInt(frameRateInput.value) || 30 }
+                            width: { ideal: CAPTURE_IDEAL_WIDTH },
+                            height: { ideal: CAPTURE_IDEAL_HEIGHT },
+                            frameRate: { ideal: requestedFps }
                         },
                         audio: false
                     });
@@ -637,9 +765,11 @@
                 streaming = true;
                 frameCount = 0;
                 errorCount = 0;
+                oversizedCount = 0;
                 totalDataSize = 0;
                 fpsHistory = [];
                 frameSizeHistory = [];
+                jpegFrameInFlight = false;
 
                 updateStatus('Streaming active', 'success');
 
@@ -679,6 +809,7 @@
 
         function stopJpegStreaming() {
             streaming = false;
+            jpegFrameInFlight = false;
 
             if (reconnectTimer) {
                 clearTimeout(reconnectTimer);
@@ -705,6 +836,22 @@
         async function sendJpegFrame() {
             if (!streaming || !wsConnected || !ws) return;
 
+            const ackMode = jpegAckModeSelect.value;
+            const fps = parseInt(frameRateInput.value) || 6;
+            const fpsDelay = 1000 / fps;
+
+            if (ackMode === 'wait' && jpegFrameInFlight) {
+                // Stall timeout mirrors webH264's: protects against a genuinely
+                // stuck/crashed device (a lost ack would otherwise wedge this mode
+                // shut forever), not a pacing knob under normal conditions.
+                if (Date.now() - jpegFrameSentAt < JPEG_ACK_STALL_TIMEOUT_MS) {
+                    setTimeout(sendJpegFrame, fpsDelay);
+                    return;
+                }
+                console.warn('JPEG ack stall timeout exceeded; sending next frame anyway');
+                jpegFrameInFlight = false;
+            }
+
             const displayDims = getDisplayDimensions();
             const isMono = monoModeCheckbox.checked;
 
@@ -729,15 +876,33 @@
                 const quality = parseFloat(qualitySlider.value);
 
                 canvas.toBlob(async (blob) => {
+                    let sent = false;
+
                     if (blob && streaming && wsConnected) {
                         try {
                             const arrayBuffer = await blob.arrayBuffer();
 
-                            if (ws.readyState === WebSocket.OPEN) {
+                            // The device drops anything over its fixed-size buffer
+                            // outright (see MAX_FRAME_SIZE in webJPEG.cpp/
+                            // webJPEG-CYD.cpp) - checking here avoids paying the
+                            // encode + network cost for a frame that was never going
+                            // to render anyway. Real example that motivated this:
+                            // webJPEG-CYD's 40KB buffer, a 320x240 color frame
+                            // encoding to 42KB at default quality.
+                            if (arrayBuffer.byteLength > jpegMaxFrameSize) {
+                                oversizedCount++;
+                                document.getElementById('errorCount').textContent = errorCount + oversizedCount;
+                                console.warn(`JPEG frame too large for this device: ${arrayBuffer.byteLength}B > ${jpegMaxFrameSize}B limit - lower JPEG Quality. Dropped client-side (not sent).`);
+                            } else if (ws.readyState === WebSocket.OPEN) {
                                 ws.send(arrayBuffer);
+                                sent = true;
                                 frameCount++;
                                 totalDataSize += arrayBuffer.byteLength;
                                 updateJpegStats(arrayBuffer.byteLength);
+                                if (ackMode === 'wait') {
+                                    jpegFrameInFlight = true;
+                                    jpegFrameSentAt = Date.now();
+                                }
                             }
                         } catch (err) {
                             errorCount++;
@@ -747,10 +912,13 @@
                         }
                     }
 
-                    if (streaming) {
-                        const fps = parseInt(frameRateInput.value) || 6;
-                        const delay = 1000 / fps;
-                        setTimeout(sendJpegFrame, delay);
+                    // In "wait" mode, a successful send schedules its next frame from
+                    // the ack handler instead (ws.onmessage above) - scheduling here
+                    // too would send two frames for one ack. A skipped/failed frame
+                    // still needs scheduling here, since no ack is coming for a frame
+                    // the device never received.
+                    if (streaming && !(ackMode === 'wait' && sent)) {
+                        setTimeout(sendJpegFrame, fpsDelay);
                     }
                 }, 'image/jpeg', quality);
             } else {
@@ -906,8 +1074,14 @@
                 h264IgnoreAcks = ignoreAcksCheckbox.checked;
                 h264MaxInFlight = Math.max(1, parseInt(maxInFlightSelect.value, 10) || 1);
 
+                // See CAPTURE_IDEAL_WIDTH/HEIGHT's comment - requesting the tiny
+                // device resolution directly here triggered a Chrome tab-capture
+                // scaling bug; VideoFrames read via MediaStreamTrackProcessor below are
+                // encoded straight from this capture with no separate canvas resize
+                // step when rotation is 0 (see readH264Frames()), so getting a correctly
+                // *shaped* capture here matters even more than for the other pipelines.
                 const mediaStream = await navigator.mediaDevices.getDisplayMedia({
-                    video: { width: { ideal: h264DetectedWidth }, height: { ideal: h264DetectedHeight }, frameRate: { ideal: fps } },
+                    video: { width: { ideal: CAPTURE_IDEAL_WIDTH }, height: { ideal: CAPTURE_IDEAL_HEIGHT }, frameRate: { ideal: fps } },
                     audio: false
                 });
                 video.srcObject = mediaStream;
@@ -1060,6 +1234,327 @@
         }
 
         // ============================================================
+        // WebRAW pipeline (canvas -> RGB565 -> per-strip deflate -> WebSocket)
+        // ============================================================
+        //
+        // Experimental, CYD-only for now - see examples/webRAW-CYD/webRAW-CYD.cpp's
+        // file header for the full reasoning. Frame is split into fixed-height
+        // horizontal strips (rawStripRows, from /boardinfo - must match the device's
+        // own STRIP_ROWS exactly, since it decompresses each strip independently),
+        // each compressed as its own raw deflate stream and length-prefixed, so the
+        // device never needs to hold more than one strip's worth of decompressed
+        // pixels in RAM. See detectBoardConfig() for where rawWidth/rawHeight/
+        // rawStripRows/rawMaxFrameSize get set from the device's own /boardinfo.
+
+        let rawWidth = 320;
+        let rawHeight = 240;
+        let rawStripRows = 24;
+        let rawMaxFrameSize = 48 * 1024;
+        let rawFrameCount = 0;
+        let rawOversizedCount = 0;
+
+        const RAW_ACK_STALL_TIMEOUT_MS = 3000;
+        let rawFrameInFlight = false;
+        let rawFrameSentAt = 0;
+        // Without this, a lost/delayed ack in "wait" mode is unrecoverable: the only
+        // things that ever call sendRawFrame() again are the ack handler itself and
+        // sendRawFrameInner()'s own stall check below - both of which only run as a
+        // *result* of a call to sendRawFrame(), so nothing is left to make that call
+        // if the ack never (or very late) arrives. This timer is what actually invokes
+        // sendRawFrame() independently of the ack, so the stall check gets a chance to
+        // run at all. Real-hardware testing found multi-second device-side ack delays
+        // (see learnings.md), which is exactly this scenario, not a hypothetical.
+        let rawStallWatchdog = null;
+
+        // Compresses `bytes` as a standalone raw deflate stream (no zlib/gzip
+        // header/trailer - matches tinfl_decompress_mem_to_mem()'s flags=0 on the
+        // device, see webRAW-CYD.cpp's drawRawStrips()). Reads cs.readable directly
+        // via its own reader rather than wrapping it in `new Response(...)` - one
+        // fewer object per strip (10 per frame) for what's already a
+        // heavier-than-usual, partly-native-backed API - see the memory notes above
+        // sendRawFrame() below.
+        async function deflateRaw(bytes) {
+            const cs = new CompressionStream('deflate-raw');
+            const writer = cs.writable.getWriter();
+            writer.write(bytes);
+            writer.close();
+
+            const reader = cs.readable.getReader();
+            const chunks = [];
+            let total = 0;
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                chunks.push(value);
+                total += value.byteLength;
+            }
+            const result = new Uint8Array(total);
+            let offset = 0;
+            for (const chunk of chunks) {
+                result.set(chunk, offset);
+                offset += chunk.byteLength;
+            }
+            return result;
+        }
+
+        function connectRawWebSocket() {
+            return new Promise((resolve, reject) => {
+                const espAddress = espAddressInput.value.trim();
+                const wsUrl = espAddress.replace('http://', 'ws://').replace('https://', 'wss://') + '/ws-raw';
+
+                updateStatus('Connecting to raw WebSocket...', 'info');
+
+                ws = new WebSocket(wsUrl);
+                ws.binaryType = 'arraybuffer';
+
+                ws.onopen = () => {
+                    wsConnected = true;
+                    console.log('Raw WebSocket connected!');
+                    resolve();
+                };
+
+                ws.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                    wsConnected = false;
+                    reject(error);
+                };
+
+                ws.onclose = () => {
+                    console.log('Raw WebSocket closed');
+                    wsConnected = false;
+                    if (streaming) {
+                        updateStatus('Connection lost', 'warning');
+                        stopRawStreaming();
+                        activeMode = null;
+                        applyModeUI();
+                    }
+                };
+
+                // Same ack convention as webJPEG.cpp - see connectJpegWebSocket()'s
+                // identical handler.
+                ws.onmessage = () => {
+                    if (rawAckModeSelect.value !== 'wait') return;
+                    rawFrameInFlight = false;
+                    if (streaming) sendRawFrame();
+                };
+            });
+        }
+
+        async function startRawStreaming() {
+            try {
+                await connectRawWebSocket();
+
+                updateStatus('Requesting screen share...', 'info');
+                const fps = parseInt(rawFrameRateInput.value) || 6;
+                // See CAPTURE_IDEAL_WIDTH/HEIGHT's comment - requesting the tiny device
+                // resolution (rawWidth x rawHeight) directly here is what triggered a
+                // Chrome tab-capture scaling bug (confirmed on real hardware: settings
+                // claimed the requested size, but the actually decoded video was a
+                // fraction of the requested width). sendRawFrameInner()'s
+                // drawRotatedFrame() call already resizes into rawWidth x rawHeight
+                // from whatever this capture's actual shape is, so requesting a normal
+                // capture size here and letting that existing step do the resize is
+                // strictly safer than trusting Chrome's scaler for this aspect ratio.
+                const mediaStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: { width: { ideal: CAPTURE_IDEAL_WIDTH }, height: { ideal: CAPTURE_IDEAL_HEIGHT }, frameRate: { ideal: fps } },
+                    audio: false
+                });
+
+                video.srcObject = mediaStream;
+                streaming = true;
+                rawFrameCount = 0;
+                rawOversizedCount = 0;
+                rawFrameInFlight = false;
+
+                // Polls independently of the send/ack chain - see rawStallWatchdog's
+                // declaration above for why this is needed at all. Checks more often
+                // than the stall timeout itself so recovery isn't delayed by much past
+                // RAW_ACK_STALL_TIMEOUT_MS once it's actually due.
+                if (rawStallWatchdog) clearInterval(rawStallWatchdog);
+                rawStallWatchdog = setInterval(() => {
+                    if (!streaming || rawAckModeSelect.value !== 'wait' || !rawFrameInFlight) return;
+                    if (Date.now() - rawFrameSentAt < RAW_ACK_STALL_TIMEOUT_MS) return;
+                    console.warn(`RAW ack stall watchdog: no ack in ${RAW_ACK_STALL_TIMEOUT_MS}ms - forcing retry`);
+                    rawFrameInFlight = false;
+                    sendRawFrame();
+                }, 500);
+
+                // Set once here, not in the per-frame hot path - assigning
+                // canvas.width/height forces the browser to clear and reallocate the
+                // canvas's backing store even when the value isn't actually changing,
+                // which sendRawFrame() used to do on every single frame for no reason
+                // (rawWidth/rawHeight are fixed for the whole session).
+                canvas.width = rawWidth;
+                canvas.height = rawHeight;
+
+                updateStatus('Streaming active', 'success');
+
+                video.onloadedmetadata = () => {
+                    sendRawFrame();
+                };
+
+                mediaStream.getVideoTracks()[0].addEventListener('ended', () => {
+                    console.log('Stream ended by user');
+                    stopRawStreaming();
+                    activeMode = null;
+                    applyModeUI();
+                });
+            } catch (err) {
+                console.error('Error starting raw stream:', err);
+
+                if (err.name === 'NotAllowedError') {
+                    updateStatus('Permission denied', 'error');
+                } else if (err.name === 'NotFoundError') {
+                    updateStatus('Source not found', 'error');
+                } else {
+                    updateStatus('Error: ' + err.message, 'error');
+                }
+
+                if (ws && wsConnected) {
+                    ws.close();
+                    ws = null;
+                }
+                if (rawStallWatchdog) {
+                    clearInterval(rawStallWatchdog);
+                    rawStallWatchdog = null;
+                }
+                streaming = false;
+                startBtn.disabled = false;
+                stopBtn.disabled = true;
+            }
+        }
+
+        function stopRawStreaming() {
+            streaming = false;
+            rawFrameInFlight = false;
+
+            if (rawStallWatchdog) {
+                clearInterval(rawStallWatchdog);
+                rawStallWatchdog = null;
+            }
+
+            if (video.srcObject) {
+                video.srcObject.getTracks().forEach(track => track.stop());
+                video.srcObject = null;
+            }
+
+            if (ws) {
+                ws.close();
+                ws = null;
+                wsConnected = false;
+            }
+
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            updateStatus('Streaming stopped', 'info');
+        }
+
+        // Guards against overlapping sendRawFrame() executions - every exit path below
+        // is async (deflateRaw() awaits a Streams-API round trip per strip), and if
+        // something ever caused two invocations to be in flight at once, each holding
+        // its own ImageData (~300KB for 320x240) and set of per-strip
+        // CompressionStream/Response objects, the resulting pile-up compounds fast.
+        // Real-hardware testing saw frames arriving only ~7-10ms apart under
+        // "Immediate" ack mode (far faster than any sane Frame Rate setting) followed
+        // by runaway browser memory growth - this flag, plus RAW_MIN_FRAME_DELAY_MS
+        // below, are the fix.
+        let rawSending = false;
+        // Hard floor under the Frame Rate input's delay - a bad/empty input value
+        // (or a very high requested fps) should never collapse toward a near-0ms
+        // setTimeout, which is what turned into the runaway loop above.
+        const RAW_MIN_FRAME_DELAY_MS = 30;
+
+        async function sendRawFrame() {
+            if (!streaming || !wsConnected || !ws) return;
+            if (rawSending) return;
+            rawSending = true;
+            try {
+                await sendRawFrameInner();
+            } finally {
+                rawSending = false;
+            }
+        }
+
+        async function sendRawFrameInner() {
+            const ackMode = rawAckModeSelect.value;
+            const fps = parseInt(rawFrameRateInput.value) || 6;
+            const fpsDelay = Math.max(1000 / fps, RAW_MIN_FRAME_DELAY_MS);
+
+            if (ackMode === 'wait' && rawFrameInFlight) {
+                if (Date.now() - rawFrameSentAt < RAW_ACK_STALL_TIMEOUT_MS) {
+                    setTimeout(sendRawFrame, fpsDelay);
+                    return;
+                }
+                console.warn('RAW ack stall timeout exceeded; sending next frame anyway');
+                rawFrameInFlight = false;
+            }
+
+            if (!(video.videoWidth && video.videoHeight)) {
+                if (streaming) setTimeout(sendRawFrame, 100);
+                return;
+            }
+
+            // canvas.width/height are set once in startRawStreaming(), not here - see
+            // that assignment's comment.
+            drawRotatedFrame(ctx, video, canvas.width, canvas.height, getRotation());
+            const imageData = ctx.getImageData(0, 0, rawWidth, rawHeight);
+            const pixels = imageData.data;
+
+            // Each strip compresses independently (no cross-strip back-references),
+            // matching the device decompressing them independently too - see the
+            // section header comment above for why. RGB565 packing
+            // ((r&0xF8)<<8 | (g&0xFC)<<3 | b>>3) matches what webJPEG-CYD.cpp's JPEG
+            // path already produces via TFT_eSPI/JPEGDecoder, so this needs no
+            // special-casing on the device beyond skipping JPEG decode entirely.
+            const parts = [];
+            let totalLen = 0;
+            for (let stripY = 0; stripY < rawHeight; stripY += rawStripRows) {
+                const strip = new Uint16Array(rawWidth * rawStripRows);
+                let p = 0;
+                for (let y = stripY; y < stripY + rawStripRows; y++) {
+                    for (let x = 0; x < rawWidth; x++) {
+                        const i = (y * rawWidth + x) * 4;
+                        strip[p++] = ((pixels[i] & 0xF8) << 8) | ((pixels[i + 1] & 0xFC) << 3) | (pixels[i + 2] >> 3);
+                    }
+                }
+                const compressed = await deflateRaw(new Uint8Array(strip.buffer));
+                const header = new Uint8Array(4);
+                new DataView(header.buffer).setUint32(0, compressed.byteLength, true);
+                parts.push(header, compressed);
+                totalLen += header.byteLength + compressed.byteLength;
+            }
+
+            const message = new Uint8Array(totalLen);
+            let off = 0;
+            for (const part of parts) {
+                message.set(part, off);
+                off += part.byteLength;
+            }
+
+            let sent = false;
+            if (message.byteLength > rawMaxFrameSize) {
+                rawOversizedCount++;
+                console.warn(`RAW frame too large for this device: ${message.byteLength}B > ${rawMaxFrameSize}B limit. Dropped client-side (not sent).`);
+            } else if (ws.readyState === WebSocket.OPEN) {
+                ws.send(message);
+                sent = true;
+                rawFrameCount++;
+                if (ackMode === 'wait') {
+                    rawFrameInFlight = true;
+                    rawFrameSentAt = Date.now();
+                }
+            }
+
+            updateStatus(`Streaming (raw)... sent ${rawFrameCount}, oversized ${rawOversizedCount}`, 'success');
+
+            // Same reasoning as sendJpegFrame(): a successful "wait" send schedules
+            // its next frame from the ack handler instead (ws.onmessage above).
+            if (streaming && !(ackMode === 'wait' && sent)) {
+                setTimeout(sendRawFrame, fpsDelay);
+            }
+        }
+
+        // ============================================================
         // Page load
         // ============================================================
 
@@ -1074,7 +1569,7 @@
 
             if (urlParams.has('mode')) {
                 const mode = urlParams.get('mode');
-                if (['auto', 'jpeg', 'h264'].includes(mode)) {
+                if (['auto', 'jpeg', 'h264', 'raw'].includes(mode)) {
                     modeOverrideSelect.value = mode;
                 }
             }
@@ -1089,7 +1584,7 @@
             // WebJPEG-only parameters
             if (urlParams.has('displaySize')) {
                 const size = urlParams.get('displaySize');
-                const validSizes = ['536x240', '450x600', '194x368'];
+                const validSizes = ['536x240', '450x600', '194x368', '320x240'];
                 if (validSizes.includes(size)) {
                     displaySizeSelect.value = size;
                 } else if (size === 'custom' || size.includes('x')) {
@@ -1143,6 +1638,12 @@
                 const mono = urlParams.get('monoMode');
                 monoModeCheckbox.checked = (mono === 'true' || mono === '1' || mono === 'yes');
             }
+            if (urlParams.has('jpegAckMode')) {
+                const ackMode = urlParams.get('jpegAckMode');
+                if (ackMode === 'immediate' || ackMode === 'wait') {
+                    jpegAckModeSelect.value = ackMode;
+                }
+            }
 
             // WebH264-only parameters
             if (urlParams.has('h264Fps')) {
@@ -1173,6 +1674,20 @@
                 const v = urlParams.get('ignoreAcks');
                 ignoreAcksCheckbox.checked = (v === 'true' || v === '1' || v === 'yes');
             }
+
+            // WebRAW-only parameters
+            if (urlParams.has('rawFrameRate')) {
+                const fps = parseInt(urlParams.get('rawFrameRate'));
+                if (!isNaN(fps) && fps >= 1 && fps <= 30) {
+                    rawFrameRateInput.value = fps;
+                }
+            }
+            if (urlParams.has('rawAckMode')) {
+                const ackMode = urlParams.get('rawAckMode');
+                if (ackMode === 'immediate' || ackMode === 'wait') {
+                    rawAckModeSelect.value = ackMode;
+                }
+            }
         }
 
         // ============================================================
@@ -1197,12 +1712,15 @@
             ['frameRate', 'value'],
             ['quality', 'value'],
             ['monoMode', 'checked'],
+            ['jpegAckMode', 'value'],
             ['sourceType', 'value'],
             ['h264FpsInput', 'value'],
             ['h264BitrateInput', 'value'],
             ['h264BitrateModeSelect', 'value'],
             ['maxInFlightSelect', 'value'],
             ['ignoreAcksCheckbox', 'checked'],
+            ['rawFrameRateInput', 'value'],
+            ['rawAckMode', 'value'],
         ];
 
         function saveSettings() {

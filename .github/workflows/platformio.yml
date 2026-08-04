@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        env: [webJPEG, webH264]
+        env: [webJPEG, webH264, webRAW, webJPEG-CYD, webRAW-CYD]
 
     steps:
       - uses: actions/checkout@v3

@@ -1,22 +1,41 @@
 /**
- * @file      webJPEG.cpp
- * @author    Modified for browser-to-display streaming
+ * @file      webJPEG-CYD.cpp
  * @license   MIT
- * @copyright Copyright (c) 2023  Shenzhen Xin Yuan Electronic Technology Co., Ltd
- * @date      2023-06-14
- * @note      Streams a browser tab, window, or camera to the AMOLED display over WiFi.
- *            This is plain WebSocket + MJPEG (canvas.toBlob), not the WebRTC protocol -
- *            no RTCPeerConnection/SDP/ICE. Frames always render into a sprite buffer
- *            and reach the display in one push - see drawJPEG()'s comments for why.
+ * @note      Streams a browser tab, window, or camera to a "Cheap Yellow Display"
+ *            (ESP32-2432S028R: plain ESP32, 2.8" 240x320 ILI9341, no PSRAM) over WiFi.
+ *            Same WebSocket + MJPEG protocol as examples/webJPEG/webJPEG.cpp - this is
+ *            a separate port, not a shared codebase, because this board differs from
+ *            every other board in this repo in two ways that matter:
+ *
+ *            1. It's a plain ESP32 (Xtensa LX6), not an ESP32-S3. webH264 is not an
+ *               option here at all - Espressif's esp_h264 component only ships
+ *               prebuilt decoder binaries for esp32s3/esp32s3-variant/esp32p4 (see
+ *               managed_components/espressif__esp_h264/idf_component.yml's `targets:`
+ *               list, and the absence of an `esp32/` folder under its `sw/libs/`).
+ *               MJPEG has no such restriction - JPEGDecoder is a portable C library.
+ *
+ *            2. It has no PSRAM - only the ESP32's ~520KB internal SRAM, most of it
+ *               already spoken for by WiFi/BT/FreeRTOS/Arduino overhead. Every other
+ *               example in this repo leans on PSRAM (LilyGo_AMOLED's framebuffer,
+ *               webH264's decode/assembly buffers). Here, unlike
+ *               examples/webJPEG/webJPEG.cpp, there is no full-frame sprite: MCU
+ *               blocks are pushed straight to the display as they decode. That's the
+ *               exact per-MCU-block direct-render approach the AMOLED boards moved
+ *               away from (see that file's history and learnings.md) because it was
+ *               both slower and visibly rendered top-to-bottom - but on a board this
+ *               memory-constrained, skipping a ~150KB sprite buffer is the right
+ *               trade, not a regression. See learnings.md for the full reasoning.
  *
  * Required libraries:
  * - ESPAsyncWebServer: https://github.com/me-no-dev/ESPAsyncWebServer
  * - AsyncTCP: https://github.com/me-no-dev/AsyncTCP
  * - JPEGDecoder: https://github.com/Bodmer/JPEGDecoder
+ * - TFT_eSPI: https://github.com/Bodmer/TFT_eSPI (pin mapping supplied entirely via
+ *   this env's build_flags in platformio.ini - see that file, no User_Setup.h edit
+ *   needed)
  */
 
 #include <Arduino.h>
-#include <LilyGo_AMOLED.h>
 #include <TFT_eSPI.h>
 #include <WiFi.h>
 #include <ESPmDNS.h>
@@ -26,74 +45,96 @@
 #include "qrcodegen.h"
 
 // WiFi credentials. ssid/password have no sensible default (must be set via the browser
-// flasher or before compiling); mdnsName's default value doubles as its own flasher
-// placeholder, so a board flashed without ever touching the browser flasher still gets
-// a working hostname - see flasher-manifest.yml. Shared "esp-screen" default across
-// every example in this repo (not just this one) rather than a per-firmware name -
-// short, and a board's actual running firmware/build date are now shown on its own
-// display (see FW_VARIANT/buildDateString() below), so the hostname no longer needs to
-// carry that information itself. Set a custom hostname via the browser flasher or
-// wifi_credentials.h if running more than one of these boards on the same network.
-const char ssid[100] = "|*S*|";
-const char password[100] = "|*P*|";
+// flasher or before compiling) - see examples/webJPEG/webJPEG.cpp for the full
+// explanation of this placeholder convention. This board's flasher support is not yet
+// confirmed working on real hardware (see README's "Flashing"), so local builds still
+// need real credentials some other way too - wifi_credentials.h is gitignored and, if
+// present, overrides WIFI_SSID/WIFI_PASSWORD below; see wifi_credentials.h.example for
+// the format. CI (GitHub Actions) never has that file, so it always builds with the
+// "|*S*|"/"|*P*|" placeholders intact.
+#if __has_include("wifi_credentials.h")
+#include "wifi_credentials.h"
+#endif
+#ifndef WIFI_SSID
+#define WIFI_SSID "|*S*|"
+#endif
+#ifndef WIFI_PASSWORD
+#define WIFI_PASSWORD "|*P*|"
+#endif
+const char ssid[100] = WIFI_SSID;
+const char password[100] = WIFI_PASSWORD;
+// Same shared "esp-screen" default as every other example in this repo now - see
+// webJPEG.cpp's identical comment for why.
 const char mdnsName[100] = "esp-screen";
 
-// Shown as a QR code so the user can find help/docs if WiFi connection fails
-const char githubRepoUrl[] = "https://github.com/lemio/EmbeddedScreenSharing";
-
-// Shown on-device (WiFi connect/connected screens) so a board's physical display
-// alone answers "what firmware is this, and is it stale enough to reflash?" without
-// needing serial/computer access. __DATE__ is a standard, always-available compiler
-// macro (e.g. "Aug  4 2026" - note the double space for single-digit days, normalized
-// by buildDateString() below), refreshed automatically on every build with no manual
-// version bump to remember.
-#define FW_VARIANT "WebJPEG"
+// Shown on-device (WiFi connect/connected screens) - see webJPEG.cpp's identical
+// FW_VARIANT/buildDateString() for the full explanation.
+#define FW_VARIANT "WebJPEG-CYD"
 String buildDateString() {
     String d = __DATE__;
     d.replace("  ", " ");
     return d;
 }
 
+// Shown as a QR code so the user can find help/docs if WiFi connection fails
+const char githubRepoUrl[] = "https://github.com/lemio/EmbeddedScreenSharing";
+
+// A plain string, not a library-reported name - this board isn't part of
+// LilyGo_AMOLED's auto-detected lineup, there's only ever this one variant. No literal
+// '"' here on purpose - /boardinfo below concatenates this directly into a JSON string
+// without escaping, so a raw quote would silently corrupt that response.
+const char boardName[] = "CYD ESP32-2432S028R (2.8in ILI9341)";
+
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");          // color images
 AsyncWebSocket wsMono("/ws-mono"); // monochrome images
 
-TFT_eSPI tft = TFT_eSPI();
-TFT_eSprite spr = TFT_eSprite(&tft);
-LilyGo_Class amoled;
+// Hardcoded, not tft.width()/height() - confirmed on real hardware that TFT_eSPI's own
+// reporting for this panel doesn't track its physical reality (a rotation-diagnostic
+// with a labeled pixel grid, tried across all four setRotation() values, showed a hard
+// ~240px addressable-width ceiling regardless of which rotation TFT_eSPI claimed was
+// "320 wide" - a driver/controller-level quirk on this specific ILI9341 clone, not
+// something a different setRotation() value fixes). At rotation(0), this panel is
+// physically landscape; TFT_eSPI's own width()/height() for that rotation report
+// 240x320 (backwards) regardless. See learnings.md.
+#define WIDTH  320
+#define HEIGHT 240
 
-#define WIDTH  amoled.width()
-#define HEIGHT amoled.height()
+TFT_eSPI tft = TFT_eSPI(WIDTH,HEIGHT);
+
+
 
 volatile uint8_t* frameBuffer = nullptr;
 volatile size_t frameSize = 0;
 volatile bool newFrameAvailable = false;
 volatile bool isMonochrome = false;
-// millis() when the first byte of the frame currently in frameBuffer arrived (set at
-// WS_EVT_DATA's info->index==0) - handed off under frameMutex alongside frameBuffer so
-// it reflects the frame loop() is about to render, not whatever message the WebSocket
-// handler has started assembling since. Lets drawJPEG()/drawMonoJPEG() report a "Recv"
-// duration covering network + reassembly time, not just their own decode/render work -
-// see learnings.md for why that gap needed a name.
+// See examples/webJPEG/webJPEG.cpp's identical field for what this is - ported as-is,
+// PSRAM-vs-not doesn't change this part of the design.
 volatile uint32_t frameRecvTimestamp = 0;
 SemaphoreHandle_t frameMutex;
 
-// frameBuffer, wsAssemblyBuffer and wsMonoAssemblyBuffer are all allocated once from
-// PSRAM in setup() and reused for the life of the program - never malloc()/free()'d
-// per frame. No two frames compress to the same JPEG byte count, so allocating a
-// fresh buffer for every one of them makes the heap a moving target; over a long
-// enough streaming session that fragments badly enough for an allocation to fail,
-// which previously took the whole board down (a wedged async_tcp task, then a
-// watchdog reset). A fixed-size pool sidesteps that: oversized frames are dropped
-// instead of allocated for, and everything else copies into buffers whose addresses
-// never change. Mirrors webH264.cpp's wsAssemblyBuf for the same reason.
-static const size_t MAX_FRAME_SIZE = 512 * 1024;
+// Unlike examples/webJPEG/webJPEG.cpp's 512KB (sized for 8MB of PSRAM), this board has
+// no PSRAM at all - every byte here comes out of the same ~520KB of internal SRAM that
+// WiFi, Bluetooth, FreeRTOS and the Arduino core are also drawing from. Same
+// fixed-size, allocated-once-in-setup() reasoning as the AMOLED boards' crash fix
+// applies equally here - see learnings.md - just at a much smaller size because
+// there's no PSRAM to be generous with.
+//
+// Confirmed on real hardware, not just estimated: at boot, right before this
+// allocation, free heap was 302,844 bytes; a 3x64KB request (192KB) failed outright
+// even though that's well under the total free - not a total-memory problem but a
+// contiguous-block one (heap fragmentation from Arduino core/TFT_eSPI init limits the
+// largest single allocation, independent of how much is free in aggregate). 3x40KB
+// (120KB) succeeded, leaving 179,916 bytes free afterward for WiFi/BT/AsyncWebServer.
+// 40KB is comfortably enough for a 240x320 JPEG regardless (even high-quality frames
+// at this resolution rarely exceed 40-50KB) - if yours needs more, the free-heap log
+// lines in setup() will show whether there's room to raise it.
+static const size_t MAX_FRAME_SIZE = 40 * 1024;
 
-// Reassembles fragmented WebSocket frames before they're handed off above
 uint8_t* wsAssemblyBuffer = nullptr;
 size_t wsAssemblySize = 0;
 size_t wsExpectedSize = 0;
-uint32_t wsRecvStartMs = 0; // millis() at this message's first fragment (info->index==0)
+uint32_t wsRecvStartMs = 0;
 
 uint8_t* wsMonoAssemblyBuffer = nullptr;
 size_t wsMonoAssemblySize = 0;
@@ -103,10 +144,6 @@ uint32_t wsMonoRecvStartMs = 0;
 volatile uint32_t frameCount = 0;
 volatile uint32_t lastFrameTime = 0;
 
-// Per-frame timings look consistently good in isolation - what they hide is the gap
-// *between* lines, which is where a stall, a WiFi hiccup, or the runup to a crash
-// actually shows up. Prefixing every diagnostic line with device uptime makes those
-// gaps visible directly in the log instead of having to guess from context.
 #define LOGF(fmt, ...) Serial.printf("[%10lu] " fmt, millis(), ##__VA_ARGS__)
 #define LOGLN(msg) Serial.printf("[%10lu] " msg "\n", millis())
 
@@ -128,23 +165,21 @@ void drawJPEG(uint8_t *jpegData, size_t jpegSize, uint32_t recvStartMs) {
         return;
     }
 
-    // True when the JPEG already matches the display size exactly - still worth
-    // knowing (a mismatch means the image is being centered/letterboxed), but no
-    // longer changes how rendering happens: every frame renders into the sprite and
-    // reaches the display in a single push (see the Push step below), rather than the
-    // old per-MCU-block direct-to-display path, which was both the dominant cost
-    // (many small display-bus transactions) and produced a visible top-to-bottom
-    // "unrolling" effect as blocks landed on screen one at a time.
+    // True when the JPEG already matches the display size exactly - stream.html
+    // always sizes its capture canvas to match the selected display size, so this is
+    // the overwhelmingly common case in practice; a mismatch (directRender == false)
+    // only happens with a manually-set wrong size.
     bool directRender = (w == WIDTH && h == HEIGHT);
 
     LOGF("JPEG: %dx%d | Display: %dx%d | Direct: %s | MCU: %dx%d\n",
          w, h, WIDTH, HEIGHT, directRender ? "YES" : "NO",
          JpegDec.MCUWidth, JpegDec.MCUHeight);
 
-    // Skippable when directRender: every display pixel gets overwritten by the MCU
-    // loop below, so there's nothing left for stale sprite content to show through.
+    // No sprite buffer here (see the file header comment for why), so centering a
+    // mismatched frame means clearing the real screen directly - this can flicker
+    // since there's no offscreen buffer to prepare first. Rare path in practice.
     if (!directRender) {
-        spr.fillSprite(TFT_BLACK);
+        tft.fillScreen(TFT_BLACK);
     }
 
     int16_t offsetX = (WIDTH - w) >> 1;
@@ -157,12 +192,12 @@ void drawJPEG(uint8_t *jpegData, size_t jpegSize, uint32_t recvStartMs) {
 
     uint32_t t3 = millis();
 
-    // This loop runs ~500 iterations back-to-back with no yield, which was suspected
-    // (see learnings.md) of starving the WiFi/TCP stack's own task long enough to
-    // delay ACK generation and trigger sender-side retransmission backoff - stalls of
-    // hundreds of ms to over a second, invisible in this function's own timing because
-    // they happen *before* a frame gets here, not during it. taskYIELD() every 64
-    // blocks gives that task a chance to run without the fixed-delay cost of delay().
+    // Pushes each decoded MCU block straight to the display over SPI as it comes off
+    // the decoder - no intermediate sprite. See the file header comment for why this
+    // is the right trade on this board despite being the opposite of what
+    // examples/webJPEG/webJPEG.cpp does. taskYIELD() every 64 blocks gives the
+    // WiFi/TCP stack's own task a chance to run during this loop - see that file's
+    // identical comment and learnings.md for why that matters.
     uint16_t mcuCount = 0;
     while (JpegDec.read()) {
         uint16_t *pImg = JpegDec.pImage;
@@ -171,7 +206,6 @@ void drawJPEG(uint8_t *jpegData, size_t jpegSize, uint32_t recvStartMs) {
         uint16_t mcu_y = JpegDec.MCUy * mcu_h;
         if (mcu_x >= w || mcu_y >= h) continue;
 
-        // Clip this MCU block to the image bounds
         uint16_t valid_w = (mcu_x + mcu_w <= w) ? mcu_w : (w - mcu_x);
         uint16_t valid_h = (mcu_y + mcu_h <= h) ? mcu_h : (h - mcu_y);
         if (valid_w == 0 || valid_h == 0) continue;
@@ -180,7 +214,6 @@ void drawJPEG(uint8_t *jpegData, size_t jpegSize, uint32_t recvStartMs) {
         int16_t destY = offsetY + mcu_y;
         if (destX >= WIDTH || destY >= HEIGHT) continue;
 
-        // Clip again to the display bounds
         uint16_t render_w = valid_w;
         uint16_t render_h = valid_h;
         if (destX + render_w > WIDTH) {
@@ -191,8 +224,8 @@ void drawJPEG(uint8_t *jpegData, size_t jpegSize, uint32_t recvStartMs) {
         }
         if (render_w == 0 || render_h == 0) continue;
 
-        // Edge blocks need only their valid portion copied out of the MCU buffer -
-        // spr.pushImage() byte-swaps internally, so no manual swap needed here.
+        // tft.pushImage() byte-swaps internally (setSwapBytes(true) in setup()), so no
+        // manual swap needed here - same as the sprite path on the AMOLED boards.
         if (render_w != mcu_w || render_h != mcu_h) {
             uint16_t tempBuffer[render_w * render_h];
             for (uint16_t row = 0; row < render_h; row++) {
@@ -200,9 +233,9 @@ void drawJPEG(uint8_t *jpegData, size_t jpegSize, uint32_t recvStartMs) {
                     tempBuffer[row * render_w + col] = pImg[row * mcu_w + col];
                 }
             }
-            spr.pushImage(destX, destY, render_w, render_h, tempBuffer);
+            tft.pushImage(destX, destY, render_w, render_h, tempBuffer);
         } else {
-            spr.pushImage(destX, destY, render_w, render_h, pImg);
+            tft.pushImage(destX, destY, render_w, render_h, pImg);
         }
 
         if (++mcuCount % 64 == 0) {
@@ -212,9 +245,11 @@ void drawJPEG(uint8_t *jpegData, size_t jpegSize, uint32_t recvStartMs) {
 
     uint32_t t4 = millis();
 
-    amoled.pushColors(0, 0, WIDTH, HEIGHT, (uint16_t *)spr.getPointer());
-
-    uint32_t t5 = millis();
+    // No separate bulk push step - each block above already reached the display
+    // directly, so this stage is 0ms by construction. Kept in the log for the same
+    // field layout as examples/webJPEG/webJPEG.cpp, so a serial log from this board
+    // is directly comparable to one from an AMOLED board.
+    uint32_t t5 = t4;
 
     LOGF("Timing: Recv=%lums | Decode=%lums | Setup=%lums | Render=%lums | Push=%lums | Total=%lums\n",
          t1 - recvStartMs, t2-t1, t3-t2, t4-t3, t5-t4, t5-recvStartMs);
@@ -223,7 +258,6 @@ void drawJPEG(uint8_t *jpegData, size_t jpegSize, uint32_t recvStartMs) {
 void drawMonoJPEG(uint8_t *jpegData, size_t jpegSize, uint32_t recvStartMs) {
     uint32_t t1 = millis();
 
-    // Decode JPEG (grayscale)
     if (!JpegDec.decodeArray(jpegData, jpegSize)) {
         LOGF("Mono JPEG decode failed! (Recv=%lums)\n", t1 - recvStartMs);
         return;
@@ -244,7 +278,7 @@ void drawMonoJPEG(uint8_t *jpegData, size_t jpegSize, uint32_t recvStartMs) {
     bool directRender = (w == WIDTH && h == HEIGHT);
 
     if (!directRender) {
-        spr.fillSprite(TFT_BLACK);
+        tft.fillScreen(TFT_BLACK);
     }
 
     int16_t offsetX = (WIDTH - w) >> 1;
@@ -257,7 +291,6 @@ void drawMonoJPEG(uint8_t *jpegData, size_t jpegSize, uint32_t recvStartMs) {
 
     uint32_t t3 = millis();
 
-    // See the comment on drawJPEG()'s identical loop for why this yields periodically.
     uint16_t mcuCount = 0;
     while (JpegDec.read()) {
         uint16_t *pImg = JpegDec.pImage;
@@ -281,7 +314,6 @@ void drawMonoJPEG(uint8_t *jpegData, size_t jpegSize, uint32_t recvStartMs) {
             render_h = HEIGHT - destY;
         }
 
-        // spr.pushImage() byte-swaps internally, so no manual swap needed here.
         if (render_w != mcu_w || render_h != mcu_h) {
             uint16_t tempBuffer[render_w * render_h];
             for (uint16_t row = 0; row < render_h; row++) {
@@ -289,9 +321,9 @@ void drawMonoJPEG(uint8_t *jpegData, size_t jpegSize, uint32_t recvStartMs) {
                     tempBuffer[row * render_w + col] = pImg[row * mcu_w + col];
                 }
             }
-            spr.pushImage(destX, destY, render_w, render_h, tempBuffer);
+            tft.pushImage(destX, destY, render_w, render_h, tempBuffer);
         } else {
-            spr.pushImage(destX, destY, render_w, render_h, pImg);
+            tft.pushImage(destX, destY, render_w, render_h, pImg);
         }
 
         if (++mcuCount % 64 == 0) {
@@ -300,17 +332,15 @@ void drawMonoJPEG(uint8_t *jpegData, size_t jpegSize, uint32_t recvStartMs) {
     }
 
     uint32_t t4 = millis();
-
-    amoled.pushColors(0, 0, WIDTH, HEIGHT, (uint16_t *)spr.getPointer());
-
-    uint32_t t5 = millis();
+    uint32_t t5 = t4;
 
     LOGF("Mono Timing: Recv=%lums | Decode=%lums | Setup=%lums | Render=%lums | Push=%lums | Total=%lums\n",
          t1 - recvStartMs, t2-t1, t3-t2, t4-t3, t5-t4, t5-recvStartMs);
 }
 
-// Renders `text` as a QR code into the sprite, centered at (centerX, centerY),
-// scaled as large as possible within a maxSize x maxSize box.
+// Renders `text` as a QR code centered at (centerX, centerY), scaled as large as
+// possible within a maxSize x maxSize box. Draws straight to tft - see the file
+// header comment for why there's no sprite to draw into first on this board.
 #define QR_MAX_VERSION 10
 void drawQRCode(const char *text, int16_t centerX, int16_t centerY, int16_t maxSize, uint16_t fgColor, uint16_t bgColor) {
     uint8_t qrTemp[qrcodegen_BUFFER_LEN_FOR_VERSION(QR_MAX_VERSION)];
@@ -320,7 +350,7 @@ void drawQRCode(const char *text, int16_t centerX, int16_t centerY, int16_t maxS
                                     qrcodegen_VERSION_MIN, QR_MAX_VERSION,
                                     qrcodegen_Mask_AUTO, true);
     if (!ok) {
-        Serial.println("QR code generation failed!");
+        LOGLN("QR code generation failed!");
         return;
     }
 
@@ -333,12 +363,12 @@ void drawQRCode(const char *text, int16_t centerX, int16_t centerY, int16_t maxS
     int startX = centerX - totalSize / 2;
     int startY = centerY - totalSize / 2;
 
-    spr.fillRect(startX, startY, totalSize, totalSize, bgColor);
+    tft.fillRect(startX, startY, totalSize, totalSize, bgColor);
 
     for (int y = 0; y < size; y++) {
         for (int x = 0; x < size; x++) {
             if (qrcodegen_getModule(qrOut, x, y)) {
-                spr.fillRect(startX + (quietZoneModules + x) * scale,
+                tft.fillRect(startX + (quietZoneModules + x) * scale,
                              startY + (quietZoneModules + y) * scale,
                              scale, scale, fgColor);
             }
@@ -347,7 +377,7 @@ void drawQRCode(const char *text, int16_t centerX, int16_t centerY, int16_t maxS
 }
 
 void setupWiFi() {
-    Serial.println("Connecting to WiFi...");
+    LOGLN("Connecting to WiFi...");
     WiFi.mode(WIFI_STA);
     WiFi.begin(ssid, password);
 
@@ -355,39 +385,41 @@ void setupWiFi() {
     const char spinnerFrames[] = {'|', '/', '-', '\\'};
     int attempts = 0;
 
+    // Drawn once, not every attempt - only the spinner character and the progress bar
+    // fill (both inside the loop below) actually change per attempt. Re-clearing and
+    // redrawing the whole screen every 500ms (the old code called fillScreen(BLACK)
+    // on every iteration) produced a visible black flash each tick, since there's no
+    // sprite buffer on this board to prepare a frame in before it's visible (see the
+    // file header comment for why). Redrawing just the small changing regions with
+    // opaque text/fill (setTextColor's background param, fillRect) avoids that without
+    // needing one.
+    tft.fillScreen(TFT_BLACK);
+    tft.setTextDatum(TC_DATUM);
+    // See webJPEG.cpp's identical line for why this is here - static like the rest of
+    // this block, so it's drawn once here rather than inside the per-attempt loop.
+    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    tft.drawString(String(FW_VARIANT) + "  " + buildDateString(), WIDTH / 2, 4, 1);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString("Connecting to WiFi", WIDTH / 2, HEIGHT * 0.10, 2);
+    tft.setTextColor(TFT_CYAN, TFT_BLACK);
+    tft.drawString(ssid, WIDTH / 2, HEIGHT * 0.10 + 22, 2);
+
+    int barWidth = WIDTH * 0.6;
+    int barHeight = 8;
+    int barX = (WIDTH - barWidth) / 2;
+    int barY = HEIGHT - 28;
+    tft.drawRect(barX, barY, barWidth, barHeight, TFT_DARKGREY);
+    tft.setTextDatum(TL_DATUM);
+
     while (WiFi.status() != WL_CONNECTED && attempts < maxAttempts) {
-        spr.fillSprite(TFT_BLACK);
-        spr.setTextDatum(TC_DATUM);
-
-        // What firmware is this, and how stale? Shown on every status screen (not
-        // just once at boot) so it's visible the whole time someone might be looking
-        // at the physical display, including while troubleshooting a WiFi connect
-        // failure - exactly when "is this even the firmware I think it is" matters.
-        spr.setTextColor(TFT_DARKGREY, TFT_BLACK);
-        spr.drawString(String(FW_VARIANT) + "  " + buildDateString(), WIDTH / 2, 4, 1);
-
-        spr.setTextColor(TFT_WHITE, TFT_BLACK);
-        spr.drawString("Connecting to WiFi", WIDTH / 2, HEIGHT * 0.10, 2);
-
-        spr.setTextColor(TFT_CYAN, TFT_BLACK);
-        spr.drawString(ssid, WIDTH / 2, HEIGHT * 0.10 + 22, 2);
-
-        // Spinner: rotates once per attempt to show the connection is progressing
         char spinner[2] = { spinnerFrames[attempts % 4], '\0' };
-        spr.setTextColor(TFT_WHITE, TFT_BLACK);
-        spr.drawString(spinner, WIDTH / 2, HEIGHT * 0.52, 4);
+        tft.setTextDatum(TC_DATUM);
+        tft.setTextColor(TFT_WHITE, TFT_BLACK);
+        tft.drawString(spinner, WIDTH / 2, HEIGHT * 0.52, 4);
+        tft.setTextDatum(TL_DATUM);
 
-        // Progress bar: fills based on attempts remaining before timeout
-        int barWidth = WIDTH * 0.6;
-        int barHeight = 8;
-        int barX = (WIDTH - barWidth) / 2;
-        int barY = HEIGHT - 28;
-        spr.drawRect(barX, barY, barWidth, barHeight, TFT_DARKGREY);
         int fillWidth = (barWidth - 2) * attempts / maxAttempts;
-        spr.fillRect(barX + 1, barY + 1, fillWidth, barHeight - 2, TFT_CYAN);
-
-        spr.setTextDatum(TL_DATUM);
-        amoled.pushColors(0, 0, WIDTH, HEIGHT, (uint16_t *)spr.getPointer());
+        tft.fillRect(barX + 1, barY + 1, fillWidth, barHeight - 2, TFT_CYAN);
 
         delay(500);
         Serial.print(".");
@@ -395,94 +427,75 @@ void setupWiFi() {
     }
 
     if (WiFi.status() == WL_CONNECTED) {
-        Serial.println("\nWiFi connected!");
-        Serial.print("IP address: ");
-        Serial.println(WiFi.localIP());
+        Serial.println();
+        LOGLN("WiFi connected!");
+        LOGF("IP address: %s\n", WiFi.localIP().toString().c_str());
 
         if (MDNS.begin(mdnsName)) {
-            Serial.print("mDNS responder started: ");
-            Serial.print(mdnsName);
-            Serial.println(".local");
+            LOGF("mDNS responder started: %s.local\n", mdnsName);
         } else {
-            Serial.println("Error setting up mDNS");
+            LOGLN("Error setting up mDNS");
         }
 
-        spr.fillSprite(TFT_BLACK);
-        spr.setTextDatum(TC_DATUM);
-        spr.setTextColor(TFT_DARKGREY, TFT_BLACK);
-        spr.drawString(String(FW_VARIANT) + "  " + buildDateString(), WIDTH / 2, 4, 1);
-        spr.setTextColor(TFT_GREEN, TFT_BLACK);
-        spr.drawString("WiFi Connected", WIDTH / 2, HEIGHT * 0.08, 2);
-        spr.setTextColor(TFT_WHITE, TFT_BLACK);
-        spr.drawString(ssid, WIDTH / 2, HEIGHT * 0.08 + 22, 2);
-        spr.drawString(WiFi.localIP().toString(), WIDTH / 2, HEIGHT * 0.08 + 44, 2);
-        spr.drawString("http://" + String(mdnsName) + ".local", WIDTH / 2, HEIGHT * 0.08 + 66, 2);
-        spr.setTextColor(TFT_YELLOW, TFT_BLACK);
-        spr.drawString("Waiting for stream...", WIDTH / 2, HEIGHT * 0.08 + 92, 2);
-        spr.setTextDatum(TL_DATUM);
-        amoled.pushColors(0, 0, WIDTH, HEIGHT, (uint16_t *)spr.getPointer());
+        tft.fillScreen(TFT_BLACK);
+        tft.setTextDatum(TC_DATUM);
+        tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+        tft.drawString(String(FW_VARIANT) + "  " + buildDateString(), WIDTH / 2, 4, 1);
+        tft.setTextColor(TFT_GREEN, TFT_BLACK);
+        tft.drawString("WiFi Connected", WIDTH / 2, HEIGHT * 0.08, 2);
+        tft.setTextColor(TFT_WHITE, TFT_BLACK);
+        tft.drawString(ssid, WIDTH / 2, HEIGHT * 0.08 + 22, 2);
+        tft.drawString(WiFi.localIP().toString(), WIDTH / 2, HEIGHT * 0.08 + 44, 2);
+        tft.drawString("http://" + String(mdnsName) + ".local", WIDTH / 2, HEIGHT * 0.08 + 66, 2);
+        tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+        tft.drawString("Waiting for stream...", WIDTH / 2, HEIGHT * 0.08 + 92, 2);
+        tft.setTextDatum(TL_DATUM);
     } else {
-        Serial.println("\nWiFi connection failed!");
-        spr.fillSprite(TFT_BLACK);
-        spr.setTextDatum(TC_DATUM);
+        LOGLN("WiFi connection failed!");
+        tft.fillScreen(TFT_BLACK);
+        tft.setTextDatum(TC_DATUM);
 
-        // No variant/build-date line on this screen, unlike the connecting/connected
-        // screens above - this one is already tuned tight for the smallest panel
-        // (font 1 "to keep this long line from overflowing narrower displays", per the
-        // comment below); adding another top line here risks colliding with it on the
-        // 1.47" Lite (194px tall) without real hardware to verify the spacing.
-        spr.setTextColor(TFT_RED, TFT_BLACK);
-        spr.drawString("Can't connect to WiFi network", WIDTH / 2, HEIGHT * 0.05, 1);
-        spr.setTextColor(TFT_WHITE, TFT_BLACK);
-        spr.drawString(ssid, WIDTH / 2, HEIGHT * 0.05 + 14, 2);
+        tft.setTextColor(TFT_RED, TFT_BLACK);
+        tft.drawString("Can't connect to WiFi network", WIDTH / 2, HEIGHT * 0.05, 1);
+        tft.setTextColor(TFT_WHITE, TFT_BLACK);
+        tft.drawString(ssid, WIDTH / 2, HEIGHT * 0.05 + 14, 2);
 
-        // QR code links to the project repo so the user can look up setup help
         int textBottom = HEIGHT * 0.05 + 14 + 18;
         int captionHeight = 16;
         int qrMaxSize = min((int)WIDTH, (int)HEIGHT - textBottom - captionHeight) * 0.9;
         int qrCenterY = textBottom + (HEIGHT - captionHeight - textBottom) / 2;
         drawQRCode(githubRepoUrl, WIDTH / 2, qrCenterY, qrMaxSize, TFT_WHITE, TFT_BLACK);
 
-        spr.setTextColor(TFT_DARKGREY, TFT_BLACK);
-        spr.drawString("Scan for setup help", WIDTH / 2, HEIGHT - 16, 2);
+        tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+        tft.drawString("Scan for setup help", WIDTH / 2, HEIGHT - 16, 2);
 
-        spr.setTextDatum(TL_DATUM);
-        amoled.pushColors(0, 0, WIDTH, HEIGHT, (uint16_t *)spr.getPointer());
+        tft.setTextDatum(TL_DATUM);
     }
 }
 
 void setupWebServer() {
-    // The streaming page is hosted on GitHub Pages (see the "/" redirect below), so its
-    // fetch("/boardinfo") calls back to this device are cross-origin. Every endpoint
-    // here is read-only board/status info or the streaming WebSocket - nothing
-    // sensitive or mutating - so a wildcard is fine.
     DefaultHeaders::Instance().addHeader("Access-Control-Allow-Origin", "*");
 
-    // Serve board info as JSON - "variant" lets the shared stream.html page tell this
-    // firmware apart from webH264's and adjust its controls/streaming protocol
-    // accordingly (see examples/webH264/webH264.cpp's matching /boardinfo).
     server.on("/boardinfo", HTTP_GET, [](AsyncWebServerRequest *request) {
         String json = "{";
         json += "\"variant\":\"jpeg\",";
-        json += "\"name\":\"" + String(amoled.getName()) + "\",";
+        json += "\"name\":\"" + String(boardName) + "\",";
         json += "\"width\":" + String(WIDTH) + ",";
         json += "\"height\":" + String(HEIGHT) + ",";
-        json += "\"boardId\":" + String(amoled.getBoardID()) + ",";
+        // No LilyGo_AMOLED board-ID enum applies here - this firmware only ever runs
+        // on this one board, so there's nothing to distinguish. stream.html doesn't
+        // use this field for anything; kept only for /boardinfo shape compatibility.
+        json += "\"boardId\":0,";
         // Lets stream.html cap JPEG quality/size client-side instead of encoding and
         // sending a frame this device can only ever drop - see MAX_FRAME_SIZE's comment.
+        // Real-world importance confirmed on this board: a 320x240 color JPEG hit
+        // 42,158 bytes (over the 40KB default) at default quality, getting silently
+        // dropped by the device every time until stream.html started checking this.
         json += "\"maxFrameSize\":" + String(MAX_FRAME_SIZE);
         json += "}";
         request->send(200, "application/json", json);
     });
 
-    // Redirect to the HTTPS-hosted copy of the streaming page on GitHub Pages.
-    // getDisplayMedia()/getUserMedia() require a "secure context" - plain http:// on a
-    // LAN address or mDNS hostname doesn't qualify (only literal localhost/127.0.0.1
-    // do), so serving the streaming UI directly from here would silently fail to offer
-    // screen share. See examples/webJPEG/README.md for the tradeoffs this introduces
-    // (needs internet access to reach GitHub Pages, and a one-time browser permission
-    // for the WebSocket connection back to this device, since it's ws:// not wss://).
-    // This same page also serves webH264 - see examples/stream.html.
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
         String url = "https://lemio.github.io/EmbeddedScreenSharing/stream.html?espAddress=http://" + request->host();
         request->redirect(url);
@@ -499,7 +512,6 @@ void setupWebServer() {
         } else if (type == WS_EVT_DATA) {
             AwsFrameInfo *info = (AwsFrameInfo*)arg;
 
-            // Only binary frames (JPEG images) carry a video frame
             if (info->opcode != WS_BINARY && info->opcode != WS_CONTINUATION) {
                 return;
             }
@@ -607,7 +619,6 @@ void setupWebServer() {
 
     server.addHandler(&wsMono);
 
-
     server.begin();
     LOGLN("Web server started");
 }
@@ -615,43 +626,52 @@ void setupWebServer() {
 void setup()
 {
     Serial.begin(115200);
-    LOGLN("Starting webJPEG display...");
+    LOGLN("Starting webJPEG-CYD display...");
 
     delay(3000);
 
-    if (!amoled.begin()) {
-        while (1) {
-            LOGLN("Display init failed!");
-            delay(1000);
-        }
-    }
-
-    spr.createSprite(WIDTH, HEIGHT);
-    spr.setSwapBytes(true);
+    tft.init();
+    // Native orientation (portrait, 240x320) - deliberately NOT setRotation(1)/(3) for
+    // landscape. Confirmed on real hardware: setRotation(1) on this board's ILI9341
+    // doesn't actually rotate the panel's addressable window the way TFT_eSPI expects
+    // (a real, board-specific quirk, not a config mistake) - pushing a 320x240-shaped
+    // frame at rotation 1 showed up as portrait content with a corrupted/"noisy" band
+    // where the mismatched row width wrapped into the wrong scanlines. Rotation 0 is
+    // the panel's power-on-default orientation, so it's the one most likely to just
+    // work regardless of that quirk. Use stream.html's Rotation option (90deg/270deg)
+    // to get landscape-shaped content onto this board instead of fighting the panel's
+    // rotation register - that happens entirely in the browser, so it sidesteps this
+    // firmware-level issue completely. See learnings.md.
+    tft.setRotation(0);
+    tft.setSwapBytes(true);
+    tft.fillScreen(TFT_BLACK);
 
     frameMutex = xSemaphoreCreateMutex();
 
-    // See the comment above MAX_FRAME_SIZE for why these are allocated once here
-    // instead of per-frame.
-    wsAssemblyBuffer = (uint8_t*)heap_caps_malloc(MAX_FRAME_SIZE, MALLOC_CAP_SPIRAM);
-    wsMonoAssemblyBuffer = (uint8_t*)heap_caps_malloc(MAX_FRAME_SIZE, MALLOC_CAP_SPIRAM);
-    frameBuffer = (volatile uint8_t*)heap_caps_malloc(MAX_FRAME_SIZE, MALLOC_CAP_SPIRAM);
+    // No PSRAM on this board - see the file header comment and MAX_FRAME_SIZE's
+    // comment above. Logging free heap before/after helps diagnose a boot that gets
+    // this far but then fails the allocation below on a real board, since the actual
+    // free-heap budget after WiFi/BT init isn't something that can be verified without
+    // hardware in hand.
+    LOGF("Free heap before frame buffer allocation: %u bytes\n", ESP.getFreeHeap());
+    wsAssemblyBuffer = (uint8_t*)malloc(MAX_FRAME_SIZE);
+    wsMonoAssemblyBuffer = (uint8_t*)malloc(MAX_FRAME_SIZE);
+    frameBuffer = (volatile uint8_t*)malloc(MAX_FRAME_SIZE);
+    LOGF("Free heap after frame buffer allocation: %u bytes\n", ESP.getFreeHeap());
     if (!wsAssemblyBuffer || !wsMonoAssemblyBuffer || !frameBuffer) {
         while (1) {
-            LOGLN("Frame buffer allocation failed!");
+            LOGLN("Frame buffer allocation failed! (see MAX_FRAME_SIZE's comment - try lowering it)");
             delay(1000);
         }
     }
 
-    spr.fillSprite(TFT_BLACK);
-    spr.setTextColor(TFT_WHITE, TFT_BLACK);
-    spr.setTextDatum(TC_DATUM);
-    spr.drawString("webJPEG", WIDTH/2, HEIGHT/2 - 20, 2);
-    spr.drawString("Starting...", WIDTH/2, HEIGHT/2 + 10, 2);
-    spr.setTextColor(TFT_DARKGREY, TFT_BLACK);
-    spr.drawString(buildDateString(), WIDTH/2, HEIGHT/2 + 30, 1);
-    spr.setTextDatum(TL_DATUM);
-    amoled.pushColors(0, 0, WIDTH, HEIGHT, (uint16_t *)spr.getPointer());
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.setTextDatum(TC_DATUM);
+    tft.drawString("webJPEG-CYD", WIDTH/2, HEIGHT/2 - 20, 2);
+    tft.drawString("Starting...", WIDTH/2, HEIGHT/2 + 10, 2);
+    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    tft.drawString(buildDateString(), WIDTH/2, HEIGHT/2 + 30, 1);
+    tft.setTextDatum(TL_DATUM);
     delay(1000);
 
     setupWiFi();
@@ -694,14 +714,13 @@ void loop()
         }
     }
 
-    // Status line every 30 seconds
     unsigned long now = millis();
     if (now - lastCheck > 30000) {
         if (frameCount > 0) {
-            LOGF("Frames: %lu | Last: %lums\n", frameCount, lastFrameTime);
+            LOGF("Frames: %lu | Last: %lums | Free heap: %u bytes\n", frameCount, lastFrameTime, ESP.getFreeHeap());
         }
         lastCheck = now;
     }
 
-    vTaskDelay(1); // yields so the idle task can run; delay() would block longer than needed
+    vTaskDelay(1);
 }

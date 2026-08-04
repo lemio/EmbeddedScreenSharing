@@ -3,19 +3,37 @@
 # builds every environment in platformio.ini, then merges this file's per-example
 # name/description/variables into the generated manifest.json alongside each compiled
 # binary - matched up by PlatformIO environment name, so each key under `examples:`
-# below must exactly match an `[env:...]` name in platformio.ini (webJPEG, webH264).
+# below must exactly match an `[env:...]` name in platformio.ini (webJPEG, webH264,
+# webJPEG-CYD, webRAW-CYD, webRAW - note webRAW itself isn't listed below yet, see
+# that TODO further down).
 #
 # `variables[].firmware_name` must match the exact string each example's .cpp file
 # reserves as a fixed-size array (e.g. `const char ssid[100] = "|*S*|";`) - it's the
 # literal text the flasher searches for in the compiled binary. ssid/password have no
-# sensible default (must be patched here, or before compiling); webJPEG's mdnsName
-# default value is itself both a working hostname AND the flasher's search key, so a
-# board flashed without ever touching the browser flasher still gets a usable
-# http://esp-webjpeg.local (http://esp-webh264.local for webH264).
+# sensible default (must be patched here, or before compiling); every example's
+# mdnsName default value is itself both a working hostname AND the flasher's search
+# key, so a board flashed without ever touching the browser flasher still gets a usable
+# http://esp-screen.local. Every example shares this same "esp-screen" default now
+# (previously a different name per firmware, e.g. esp-webjpeg/esp-webh264) - see
+# webJPEG.cpp's mdnsName comment for why; the on-device display now shows which
+# firmware/build is actually running, so the hostname no longer needs to carry that.
+# Flashing more than one of these boards on the same network still needs a custom
+# hostname per board (the "mDNS Hostname" field below, same as before).
 #
 # `site:` (optional, alongside `examples:`) renames the flasher tool itself instead of
 # leaving it as the generic "ESP32-S3 Web Flasher"/"ESP32-S3 Flash Wizard" - see
 # ESP32-S3-Flasher's README.md, "Site-wide branding" section, for the full field list.
+#
+# CAVEAT for the webJPEG-CYD/webRAW-CYD entries below: the CYD is a plain ESP32 (not
+# S3), connected over a CH340 USB-serial adapter, not native USB. ESP32-S3-Flasher's
+# own README describes itself as built for ESP32-S3 specifically (its shared config.js
+# sets a single, non-per-firmware CHIP_NAME: "ESP32-S3") - reading that tool's source,
+# CHIP_NAME didn't appear to be used to reject a connected device's actual chip family
+# (esptool-js itself detects the real chip from the ROM handshake), so this *should*
+# still work, but that's inference from source, not a confirmed test against real CYD
+# hardware through the actual published web flasher. Verify on hardware after this
+# publishes; if CH340/plain-ESP32 turns out to be genuinely unsupported, that's a fix
+# needed in the ESP32-S3-Flasher repo itself, not here.
 
 site:
   title: LilyGo AMOLED WebJPEG Flasher
@@ -38,9 +56,9 @@ examples:
         readable_name: WiFi Password
         default_value: ""
         max_length: 100
-      - firmware_name: esp-webjpeg
+      - firmware_name: esp-screen
         readable_name: mDNS Hostname
-        default_value: esp-webjpeg
+        default_value: esp-screen
         postfix: .local
         max_length: 100
 
@@ -62,8 +80,57 @@ examples:
         readable_name: WiFi Password
         default_value: ""
         max_length: 100
-      - firmware_name: esp-webh264
+      - firmware_name: esp-screen
         readable_name: mDNS Hostname
-        default_value: esp-webh264
+        default_value: esp-screen
+        postfix: .local
+        max_length: 100
+
+  webJPEG-CYD:
+    name: WebJPEG Stream Display (CYD)
+    description: >-
+      Streams a browser tab, camera, or screen share to the display over WiFi as MJPEG
+      frames - same protocol as WebJPEG, ported to the "Cheap Yellow Display"
+      (ESP32-2432S028R): a much cheaper, widely available board with a 2.8" 240x320
+      LCD, completely outside the LilyGo AMOLED lineup the other firmwares here target.
+    sourceUrl: https://github.com/lemio/EmbeddedScreenSharing/tree/main/examples/webJPEG-CYD
+    hardware: CYD (ESP32-2432S028R)
+    variables:
+      - firmware_name: "|*S*|"
+        readable_name: WiFi Name (SSID)
+        default_value: ""
+        max_length: 100
+      - firmware_name: "|*P*|"
+        readable_name: WiFi Password
+        default_value: ""
+        max_length: 100
+      - firmware_name: esp-screen
+        readable_name: mDNS Hostname
+        default_value: esp-screen
+        postfix: .local
+        max_length: 100
+
+  webRAW-CYD:
+    name: WebRAW Stream Display (CYD)
+    description: >-
+      Streams a browser tab, window, or screen share to the same CYD board as
+      WebJPEG-CYD, as raw RGB565 pixels deflate-compressed in the browser instead of
+      JPEG - lossless, and roughly 3-6x faster to render than JPEG on this hardware
+      (see that example's README), at the cost of a bigger payload unless the content
+      compresses well. Screen share only (no webcam).
+    sourceUrl: https://github.com/lemio/EmbeddedScreenSharing/tree/main/examples/webRAW-CYD
+    hardware: CYD (ESP32-2432S028R)
+    variables:
+      - firmware_name: "|*S*|"
+        readable_name: WiFi Name (SSID)
+        default_value: ""
+        max_length: 100
+      - firmware_name: "|*P*|"
+        readable_name: WiFi Password
+        default_value: ""
+        max_length: 100
+      - firmware_name: esp-screen
+        readable_name: mDNS Hostname
+        default_value: esp-screen
         postfix: .local
         max_length: 100

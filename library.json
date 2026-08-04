@@ -1,8 +1,8 @@
 {
   "name": "LilyGo-AMOLED-WebJPEG",
   "version": "1.2.0",
-  "description": "Streams a browser tab, window, or camera to a LilyGo T-Display AMOLED board over WiFi as MJPEG or H.264. Fork of LilyGo-AMOLED-Series trimmed to these two examples.",
-  "keywords": "lilygo,amoled,webjpeg,webh264,streaming,mjpeg,h264,websocket",
+  "description": "Streams a browser tab, window, or camera to an ESP32 display board over WiFi as MJPEG, H.264, or raw RGB565. Fork of LilyGo-AMOLED-Series, grown from two examples for LilyGo's AMOLED boards to two more for the cheaper, non-AMOLED \"Cheap Yellow Display\" board.",
+  "keywords": "esp32,lilygo,amoled,cyd,webjpeg,webh264,webraw,streaming,mjpeg,h264,websocket",
   "authors": [
     {
       "name": "Xinyuan-LilyGO",

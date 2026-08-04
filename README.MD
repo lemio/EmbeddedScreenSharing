@@ -1,17 +1,23 @@
 <h1 align = "center">EmbeddedScreenSharing</h1>
-<p align="center"><i>Use a LilyGo AMOLED display as an external monitor for prototyping</i></p>
+<p align="center"><i>Use a cheap ESP32 display as an external monitor for prototyping</i></p>
 
 [![PlatformIO CI](https://github.com/lemio/EmbeddedScreenSharing/actions/workflows/platformio.yml/badge.svg)](https://github.com/lemio/EmbeddedScreenSharing/actions/workflows/platformio.yml)
 
 ## What this is
 
 Point your browser at anything - a tab, a Figma mirror, a screen recording, your
-webcam - and it shows up live on a physical AMOLED display over WiFi. No reflashing:
-change what's on screen and the display just updates.
+webcam - and it shows up live on a physical display over WiFi. No reflashing: change
+what's on screen and the display just updates.
 
-A fork of LilyGO's [LilyGo-AMOLED-Series](https://github.com/Xinyuan-LilyGO/LilyGo-AMOLED-Series)
-board-support library, trimmed to two streaming examples plus a browser-based flasher -
-no PlatformIO install required just to try it.
+Started as a fork of LilyGO's
+[LilyGo-AMOLED-Series](https://github.com/Xinyuan-LilyGO/LilyGo-AMOLED-Series)
+board-support library, trimmed to two streaming examples (webJPEG, webH264) for that
+AMOLED lineup, plus a browser-based flasher for them (no PlatformIO install required
+just to try it). Since then it's grown two more examples
+([webJPEG-CYD](examples/webJPEG-CYD), [webRAW-CYD](examples/webRAW-CYD)) for a
+completely different, much cheaper, non-AMOLED board outside that lineup - see "Other
+boards" below - so despite the repo's LilyGo-AMOLED-rooted history, "AMOLED" isn't a
+hard requirement to use this project, just what the original two examples target.
 
 ## Which example do I want?
 
@@ -59,9 +65,26 @@ further toward webH264, since the software-decode cost this repo's numbers are a
 bound by wouldn't apply. This repo doesn't support P4 yet - both examples target
 ESP32-S3 boards, which have no hardware H.264 decode block.
 
-Both examples share the same streaming page ([stream.html](examples/stream.html)) and
-the same WiFi setup flow. The page auto-detects which example is running on the board
-you point it at.
+**A third option: [webRAW](examples/webRAW)** sends raw RGB565 pixels, deflate-
+compressed in the browser - no JPEG artifacts, no H.264 blocking on detailed content,
+genuinely lossless. Its on-device compute is real and measured: about 3x cheaper per
+pixel than webJPEG's decode+render+push (see
+[webRAW's README](examples/webRAW/README.md#measured-performance) and
+[`benchmarks/`](benchmarks) for the numbers behind that). That compute advantage
+*doesn't* translate into a similarly large real-world speed win, though - measured
+sustained throughput on the same 1.91" board is ~7.75fps with flow control on, close
+to webH264's ~8.2fps above, because browser-side compression and network time end up
+dominating the total pipeline more than the fast on-device decompress does. The real
+tradeoff is bandwidth: a raw payload is bigger than either JPEG or H.264 unless the
+content compresses very well with deflate (flat UI/screen-share content usually does;
+a busy photograph or video won't). Worth trying if visual losslessness matters more
+than bandwidth for your content, or if webJPEG's JPEG artifacts/webH264's codec tuning
+aren't a good fit - not a strict upgrade over either. Experimental, not on the browser
+flasher yet.
+
+All three examples share the same streaming page ([stream.html](examples/stream.html))
+and the same WiFi setup flow. The page auto-detects which example is running on the
+board you point it at.
 
 ## Flashing through your browser
 
@@ -73,7 +96,10 @@ No PlatformIO install needed. Every push to `main` builds and publishes ready-to
 firmware at the [browser flasher](https://lemio.github.io/EmbeddedScreenSharing/wizard.html):
 
 1. Open that link in Chrome or Edge (Web Serial support is required).
-2. Pick WebJPEG or WebH264 (see the comparison table above).
+2. Pick WebJPEG or WebH264 for the AMOLED lineup (see the comparison table above), or
+   WebJPEG-CYD/WebRAW-CYD for the "Cheap Yellow Display" board (see "Other boards"
+   below) - the CYD entries are new and not yet confirmed working through this
+   specific browser tool on real hardware, see their READMEs' "Flashing" sections.
 3. Enter your WiFi SSID, password, and optionally an mDNS hostname - these get
    written into the firmware at flash time.
 4. Plug the board in over USB and follow the on-screen steps.
@@ -92,14 +118,18 @@ Before compiling, either use the browser flasher above to set your WiFi credenti
 edit the placeholder values directly in that example's `.cpp` file:
 
 ```cpp
-const char ssid[100] = "|*S*|";           // your WiFi SSID
-const char password[100] = "|*P*|";       // your WiFi password
-const char mdnsName[100] = "esp-webjpeg"; // reachable at http://esp-webjpeg.local
+const char ssid[100] = "|*S*|";          // your WiFi SSID
+const char password[100] = "|*P*|";      // your WiFi password
+const char mdnsName[100] = "esp-screen"; // reachable at http://esp-screen.local
 ```
 
 ## Setup flow
 
-Both examples show the same sequence on the display after flashing:
+Both examples show the same sequence on the display after flashing. Every screen also
+shows a small firmware name + build date line (e.g. "WebJPEG  Aug 4 2026") - since
+every example now shares the same default hostname (see "Flashing with PlatformIO"
+above), this is how a board's physical display alone answers "what firmware is this,
+and is it stale enough to reflash?" without needing serial/computer access:
 
 1. Connecting to WiFi: your SSID, a spinner, and a progress bar (30 attempts, about
    15 seconds).
@@ -130,7 +160,10 @@ Pages fixes that, with two consequences:
   one-time exception per browser for the `lemio.github.io` origin - the "insecure"
   traffic only ever reaches your own board on your own LAN.
 
-## Supported boards
+## Supported boards (LilyGo AMOLED lineup)
+
+webJPEG/webH264/webRAW's auto-detected boards - see "Other boards" below for the
+non-AMOLED board the CYD examples target instead.
 
 | Product                    | SOC        | Flash | PSRAM     | Resolution | Size  |
 | -------------------------- | ---------- | ----- | --------- | ---------- | ----- |
@@ -138,18 +171,37 @@ Pages fixes that, with two consequences:
 | [T-Display-S3 AMOLED][2]   | ESP32-S3R8 | 16MB  | 8MB (OPI) | 240x536    | 1.91" |
 | [T4-S3][3]                 | ESP32-S3R8 | 16MB  | 8MB (OPI) | 450x600    | 2.41" |
 
+## Other boards
+
+[webJPEG-CYD](examples/webJPEG-CYD) and [webRAW-CYD](examples/webRAW-CYD) port this
+project to the "Cheap Yellow Display" (ESP32-2432S028R) - a much cheaper, widely
+available board completely outside the LilyGo AMOLED lineup above, with no AMOLED
+panel at all: plain ESP32 (not S3), no PSRAM, 2.8" 240x320 ILI9341 LCD over plain SPI.
+**webH264 cannot run on it at all** - Espressif's `esp_h264` component has no build for
+plain ESP32, only S3/S3-variant/P4 (see that example's README). Confirmed working
+end-to-end on real hardware for both examples - see their READMEs for real
+measurements and board-specific quirks found along the way (upload speed sensitivity,
+a rotation bug, a stack-size crash fix, an ack-loss recovery fix). Both are now also on
+the [browser flasher](https://lemio.github.io/EmbeddedScreenSharing/wizard.html), not
+just PlatformIO - see "Flashing through your browser" above and each README's
+"Flashing" section for that path's caveats.
+
 ## Examples
 
 ```txt
 examples/
-├── stream.html  # Shared browser streaming page - auto-detects which example is running
-├── webJPEG      # MJPEG over WebSocket
-└── webH264      # H.264 over WebSocket - sharper image, lower bandwidth
+├── stream.html   # Shared browser streaming page - auto-detects which example is running
+├── webJPEG       # MJPEG over WebSocket - LilyGo AMOLED lineup
+├── webH264       # H.264 over WebSocket - sharper image, lower bandwidth - LilyGo AMOLED lineup
+├── webRAW        # Raw RGB565, deflate-compressed in the browser, no JPEG - LilyGo AMOLED lineup
+├── webJPEG-CYD   # MJPEG, ported for the Cheap Yellow Display - see "Other boards" above
+└── webRAW-CYD    # webRAW's wire protocol, ported for the Cheap Yellow Display
 ```
 
 See each example's README ([webJPEG](examples/webJPEG/README.md),
-[webH264](examples/webH264/README.md)) for streaming controls, troubleshooting, and
-technical notes.
+[webH264](examples/webH264/README.md), [webRAW](examples/webRAW/README.md),
+[webJPEG-CYD](examples/webJPEG-CYD/README.md), [webRAW-CYD](examples/webRAW-CYD/README.md))
+for streaming controls, troubleshooting, and technical notes.
 
 ## PlatformIO Quick Start
 

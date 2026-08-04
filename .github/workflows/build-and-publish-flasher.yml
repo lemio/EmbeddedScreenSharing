@@ -1,8 +1,10 @@
 name: Build & publish flasher site
 
-# Builds every environment in platformio.ini (webJPEG, webH264 - a bare `pio run`) and
-# packages them plus a browser flashing UI into docs/, using the reusable Action from
-# lemio/ESP32-S3-Flasher - see that repo's action/action.yml for what it does.
+# Builds every environment in platformio.ini (a bare `pio run` - currently webJPEG,
+# webH264, webRAW, webJPEG-CYD, webRAW-CYD, though only the four listed under
+# `examples:` in flasher-manifest.yml actually end up in the published manifest/UI)
+# and packages them plus a browser flashing UI into docs/, using the reusable Action
+# from lemio/ESP32-S3-Flasher - see that repo's action/action.yml for what it does.
 # Publishing docs/ itself (GitHub Pages source = docs/ on main) is a one-time manual
 # setting in this repo's Settings > Pages.
 
@@ -41,6 +43,20 @@ jobs:
       - uses: lemio/ESP32-S3-Flasher/action@main
         with:
           output-dir: docs
+
+      # Firmware built in this same run all shares one build date (each .cpp's
+      # __DATE__ compiles to today, on-device - see webJPEG.cpp's FW_VARIANT/
+      # buildDateString() comment), so stamping that same date into the flasher's own
+      # UI here keeps both places consistent without hand-maintaining a version number
+      # anywhere. Appended to `description` (not a new field) since that's a field the
+      # flasher UI is guaranteed to render - a custom field name might not be.
+      - name: Stamp today's build date into the flasher manifest
+        run: |
+          BUILD_DATE=$(date -u +"%Y-%m-%d")
+          jq --arg d "$BUILD_DATE" \
+            '.firmwares |= with_entries(.value.description += " Built \($d).")' \
+            docs/manifest.json > /tmp/manifest.json
+          mv /tmp/manifest.json docs/manifest.json
 
       # Both devices' own / routes redirect here (see webJPEG.cpp/webH264.cpp's
       # setupWebServer()) instead of serving the streaming page themselves:
