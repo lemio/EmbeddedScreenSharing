@@ -96,6 +96,12 @@ String buildDateString() {
     return d;
 }
 
+// See webJPEG.cpp's identical firmwareBuildDate for the full explanation - read (not
+// patched) by the browser flasher to show a build date in the firmware list.
+// __attribute__((used)): without it the linker strips this as an unused symbol and
+// it never makes it into firmware.bin - confirmed the hard way.
+const char firmwareBuildDate[32] __attribute__((used)) = "|*FW*|" __DATE__ "|*FW*|";
+
 // Shown as a QR code so the user can find help/docs if WiFi connection fails
 const char githubRepoUrl[] = "https://github.com/lemio/EmbeddedScreenSharing";
 
@@ -109,7 +115,7 @@ LilyGo_Class amoled;
 #define WIDTH  amoled.width()
 #define HEIGHT amoled.height()
 
-// Tracks the single active viewer so loop() can nudge it directly - see
+// Nudges the connected viewer if nothing's been heard from it in a while - see
 // ACK_NUDGE_INTERVAL_MS below. Ported from webRAW-CYD.cpp, where real-hardware
 // testing found that a lost/delayed ack in "Wait for device ack" mode can otherwise
 // stall the browser for seconds with nothing left to recover it - see that example's
@@ -117,7 +123,17 @@ LilyGo_Class amoled;
 // mechanism (ESPAsyncWebServer/AsyncTCP's ack send occasionally getting delayed
 // under load) isn't CYD-specific, so this is ported here preemptively rather than
 // waiting to rediscover the same stall on this board.
-AsyncWebSocketClient* activeClient = nullptr;
+//
+// This used to cache the connected client as a raw `AsyncWebSocketClient*`
+// (`activeClient`), written from the WS event handler (AsyncTCP's own task) and
+// read+dereferenced from loop() (the separate Arduino main task) with no
+// synchronization - a genuine cross-task race on the pointer and the client object's
+// lifetime, confirmed as a real crash on webRAW-CYD (LoadProhibited panic inside
+// AsyncWebSocketClient::text()'s internal mutex lock, heap-corruption-looking
+// register values) and fixed there the same way as here: never cache a raw client
+// pointer across tasks - ws.textAll() asks the AsyncWebSocket object itself (which
+// manages its own client list with proper internal locking) to message whichever
+// client(s) are actually still connected.
 volatile uint32_t lastDataActivityMs = 0;
 static const uint32_t ACK_NUDGE_INTERVAL_MS = 2000;
 
@@ -373,15 +389,11 @@ void setupWebServer() {
                    AwsEventType type, void *arg, uint8_t *data, size_t len) {
         if (type == WS_EVT_CONNECT) {
             LOGF("WebSocket client #%u connected from %s\n", client->id(), client->remoteIP().toString().c_str());
-            activeClient = client;
             lastDataActivityMs = millis();
         } else if (type == WS_EVT_DISCONNECT) {
             LOGF("WebSocket client #%u disconnected\n", client->id());
             wsAssemblySize = 0;
             wsExpectedSize = 0;
-            if (activeClient == client) {
-                activeClient = nullptr;
-            }
         } else if (type == WS_EVT_DATA) {
             AwsFrameInfo *info = (AwsFrameInfo*)arg;
 
@@ -439,6 +451,10 @@ void setupWebServer() {
 void setup()
 {
     Serial.begin(115200);
+    // See webJPEG.cpp's identical line for why this print exists at all - it's not
+    // just a log line, it's what keeps firmwareBuildDate from being discarded by the
+    // linker's --gc-sections as an unreferenced symbol.
+    LOGF("Build marker: %s\n", firmwareBuildDate);
     LOGLN("Starting webRAW display...");
 
     delay(3000);
@@ -528,8 +544,8 @@ void loop()
     // See webRAW-CYD.cpp's identical mechanism/comment - resends the ack on our own
     // initiative if nothing's arrived in a while, in case the original ack was the
     // thing that got lost/delayed.
-    if (activeClient != nullptr && (now - lastDataActivityMs > ACK_NUDGE_INTERVAL_MS)) {
-        activeClient->text("a");
+    if (ws.count() > 0 && (now - lastDataActivityMs > ACK_NUDGE_INTERVAL_MS)) {
+        ws.textAll("a");
         lastDataActivityMs = now;
         LOGLN("RAW: no data received in a while - resending ack in case the last one was lost/delayed");
     }

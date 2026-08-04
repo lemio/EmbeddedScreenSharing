@@ -54,6 +54,18 @@ String buildDateString() {
     return d;
 }
 
+// Read-only for the browser flasher (see flasher-manifest.yml) - it searches the raw
+// compiled firmware.bin for this exact marker and shows everything before it as the
+// build date in the firmware list, then strips the marker before displaying. Unlike
+// the |*S*|/|*P*| variables above, this is never patched/overwritten - always
+// reflects the actual compiled __DATE__, independent of buildDateString()'s own
+// on-device-display formatting above. __attribute__((used)) because nothing in this
+// program ever reads it (unlike ssid/password below, which survive dead-code
+// elimination naturally by being passed to WiFi.begin()) - without it, the linker
+// strips this as an unused symbol and it silently never makes it into firmware.bin
+// at all (confirmed: it was missing from the compiled binary until this was added).
+const char firmwareBuildDate[32] __attribute__((used)) = "|*FW*|" __DATE__ "|*FW*|";
+
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");          // color images
 AsyncWebSocket wsMono("/ws-mono"); // monochrome images
@@ -615,6 +627,14 @@ void setupWebServer() {
 void setup()
 {
     Serial.begin(115200);
+    // firmwareBuildDate is otherwise never read anywhere in this program (it exists
+    // purely for the browser flasher to find by scanning the raw compiled binary) -
+    // __attribute__((used)) alone wasn't enough to survive linking: PlatformIO's
+    // -ffunction-sections/-fdata-sections + --gc-sections combo still discarded the
+    // whole unreferenced section at link time (confirmed missing from firmware.bin
+    // until this was added). A real reference like this keeps it alive - and doubles
+    // as a genuinely useful boot-log line.
+    LOGF("Build marker: %s\n", firmwareBuildDate);
     LOGLN("Starting webJPEG display...");
 
     delay(3000);

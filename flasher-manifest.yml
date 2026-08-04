@@ -4,8 +4,16 @@
 # name/description/variables into the generated manifest.json alongside each compiled
 # binary - matched up by PlatformIO environment name, so each key under `examples:`
 # below must exactly match an `[env:...]` name in platformio.ini (webJPEG, webH264,
-# webJPEG-CYD, webRAW-CYD, webRAW - note webRAW itself isn't listed below yet, see
-# that TODO further down).
+# webJPEG-CYD, webRAW-CYD, webRAW).
+#
+# `recommended: true` (optional, at most one example should set this) sorts that
+# example to the top of the flasher's list and shows a "Recommended" badge - see
+# wizard.html's renderFirmwareList().
+#
+# `expectedBehavior:` (optional, wizard only) is a bulleted list shown on the final
+# "What to Expect" step instead of just repeating `description` - each example's list
+# below mentions the live serial output panel so first-time users know it's there and
+# what it's for, not just stumble onto it.
 #
 # `variables[].firmware_name` must match the exact string each example's .cpp file
 # reserves as a fixed-size array (e.g. `const char ssid[100] = "|*S*|";`) - it's the
@@ -19,6 +27,18 @@
 # firmware/build is actually running, so the hostname no longer needs to carry that.
 # Flashing more than one of these boards on the same network still needs a custom
 # hostname per board (the "mDNS Hostname" field below, same as before).
+#
+# `hardware:` can be a plain string (shown as-is, no link) or a list of
+# `{name, url}` entries when one firmware genuinely supports multiple distinct
+# physical boards (e.g. webJPEG/webRAW auto-detect across the whole AMOLED lineup) -
+# the flasher renders each as its own linked name rather than picking just one.
+#
+# Every example's compiled firmware.bin also carries a build-date marker the flasher
+# reads (not patches) to show in the firmware list: a fixed `const char [] = __DATE__
+# "|*FW*|"` array (see any example's .cpp, near its buildDateString()). This is a
+# separate mechanism from the |*S*|/|*P*|-style variables above - those get
+# overwritten with user-provided values before flashing; this one is left exactly as
+# compiled and just read.
 #
 # `site:` (optional, alongside `examples:`) renames the flasher tool itself instead of
 # leaving it as the generic "ESP32-S3 Web Flasher"/"ESP32-S3 Flash Wizard" - see
@@ -36,10 +56,48 @@
 # needed in the ESP32-S3-Flasher repo itself, not here.
 
 site:
-  title: LilyGo AMOLED WebJPEG Flasher
+  title: Embedded Screen Sharing Flasher
   subtitle: Flash a browser-to-display video streamer straight from your browser - no PlatformIO needed
 
 examples:
+  webRAW:
+    name: WebRAW Stream Display
+    recommended: true
+    description: >-
+      Streams a browser tab, window, or screen share to the AMOLED display over WiFi as
+      raw RGB565 pixels, deflate-compressed in the browser - no JPEG anywhere in the
+      pipeline, so it's lossless (no compression artifacts) while still keeping up a
+      real-time frame rate (~7.75fps sustained on the 1.91" board with flow control on,
+      close to WebH264's ~8.2fps). Auto-detects the attached panel at boot, so this one
+      firmware works on the 1.47" Lite, 1.91", and 2.41"/T4-S3 T-Display AMOLED boards.
+      Screen share only (no webcam).
+    sourceUrl: https://github.com/lemio/EmbeddedScreenSharing/tree/main/examples/webRAW
+    hardware:
+      - name: LilyGo T-Display-AMOLED-Lite
+        url: https://www.lilygo.cc/products/t-display-amoled-lite
+      - name: LilyGo T-Display S3 AMOLED
+        url: https://lilygo.cc/products/t-display-s3-amoled
+      - name: LilyGo T4-S3
+        url: https://lilygo.cc/products/t4-s3
+    variables:
+      - firmware_name: "|*S*|"
+        readable_name: WiFi Name (SSID)
+        default_value: ""
+        max_length: 100
+      - firmware_name: "|*P*|"
+        readable_name: WiFi Password
+        default_value: ""
+        max_length: 100
+      - firmware_name: esp-screen
+        readable_name: mDNS Hostname
+        default_value: esp-screen
+        postfix: .local
+        max_length: 100
+    expectedBehavior:
+      - Device connects to WiFi and shows its IP address and mDNS hostname on screen
+      - Open the streaming page linked above and share a browser tab, window, or your whole screen
+      - Live serial output below shows connection status and per-frame timing in real time
+
   webJPEG:
     name: WebJPEG Stream Display
     description: >-
@@ -47,6 +105,13 @@ examples:
       MJPEG frames. Auto-detects the attached panel at boot, so this one firmware works
       on the 1.47" Lite, 1.91", and 2.41"/T4-S3 T-Display AMOLED boards.
     sourceUrl: https://github.com/lemio/EmbeddedScreenSharing/tree/main/examples/webJPEG
+    hardware:
+      - name: LilyGo T-Display-AMOLED-Lite
+        url: https://www.lilygo.cc/products/t-display-amoled-lite
+      - name: LilyGo T-Display S3 AMOLED
+        url: https://lilygo.cc/products/t-display-s3-amoled
+      - name: LilyGo T4-S3
+        url: https://lilygo.cc/products/t4-s3
     variables:
       - firmware_name: "|*S*|"
         readable_name: WiFi Name (SSID)
@@ -61,6 +126,10 @@ examples:
         default_value: esp-screen
         postfix: .local
         max_length: 100
+    expectedBehavior:
+      - Device connects to WiFi and shows its IP address and mDNS hostname on screen
+      - Open the streaming page linked above and share a browser tab, camera, or your whole screen
+      - Live serial output below shows connection status and per-frame timing in real time
 
   webH264:
     name: WebH264 Stream Display
@@ -68,9 +137,16 @@ examples:
       Streams a browser tab or window to the AMOLED display over WiFi as H.264, encoded
       in-browser with WebCodecs and decoded on-device. Sharper image and much lower
       bandwidth than WebJPEG at the same quality, at the cost of a slower decoder
-      (roughly 3-5fps). T4-S3 (2.41", 600x450) only.
+      (roughly 3-5fps). Auto-detects the attached panel at boot, so this one firmware
+      works on the 1.47" Lite, 1.91", and 2.41"/T4-S3 T-Display AMOLED boards.
     sourceUrl: https://github.com/lemio/EmbeddedScreenSharing/tree/main/examples/webH264
-    hardware: T4-S3
+    hardware:
+      - name: LilyGo T-Display-AMOLED-Lite
+        url: https://www.lilygo.cc/products/t-display-amoled-lite
+      - name: LilyGo T-Display S3 AMOLED
+        url: https://lilygo.cc/products/t-display-s3-amoled
+      - name: LilyGo T4-S3
+        url: https://lilygo.cc/products/t4-s3
     variables:
       - firmware_name: "|*S*|"
         readable_name: WiFi Name (SSID)
@@ -85,6 +161,10 @@ examples:
         default_value: esp-screen
         postfix: .local
         max_length: 100
+    expectedBehavior:
+      - Device connects to WiFi and shows its IP address and mDNS hostname on screen
+      - Open the streaming page linked above and share a browser tab or window
+      - Live serial output below shows connection status and per-frame timing in real time
 
   webJPEG-CYD:
     name: WebJPEG Stream Display (CYD)
@@ -94,7 +174,9 @@ examples:
       (ESP32-2432S028R): a much cheaper, widely available board with a 2.8" 240x320
       LCD, completely outside the LilyGo AMOLED lineup the other firmwares here target.
     sourceUrl: https://github.com/lemio/EmbeddedScreenSharing/tree/main/examples/webJPEG-CYD
-    hardware: CYD (ESP32-2432S028R)
+    hardware:
+      - name: CYD (ESP32-2432S028R)
+        url: https://nl.aliexpress.com/item/1005004971720824.html
     variables:
       - firmware_name: "|*S*|"
         readable_name: WiFi Name (SSID)
@@ -109,6 +191,10 @@ examples:
         default_value: esp-screen
         postfix: .local
         max_length: 100
+    expectedBehavior:
+      - Device connects to WiFi and shows its IP address and mDNS hostname on screen
+      - Open the streaming page linked above and share a browser tab, camera, or your whole screen
+      - Live serial output below shows connection status and per-frame timing in real time
 
   webRAW-CYD:
     name: WebRAW Stream Display (CYD)
@@ -134,3 +220,7 @@ examples:
         default_value: esp-screen
         postfix: .local
         max_length: 100
+    expectedBehavior:
+      - Device connects to WiFi and shows its IP address and mDNS hostname on screen
+      - Open the streaming page linked above and share a browser tab, window, or your whole screen
+      - Live serial output below shows connection status and per-frame timing in real time

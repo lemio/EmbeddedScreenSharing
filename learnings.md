@@ -485,6 +485,34 @@ own for an API with real native-side cost, look for allocations that are happeni
 every call regardless of rate, not just ones gated by it - the canvas resize matched
 that description exactly.
 
+**"Close RGB565 colors look identical on the CYD" turned out not to be a bug anywhere
+in this repo, after isolating each stage independently.** Reported symptom: several
+distinct-but-close RGB565 values (e.g. `0xf75a` vs `0xefbf`, differing by a handful of
+bits per channel - all pale/near-white tones) rendered indistinguishably on the
+device, while fully-saturated primaries looked fine. Root-caused by testing each
+layer in isolation rather than guessing at the whole pipeline at once: (1) hand-decoded
+the reported hex values bit-by-bit to confirm the browser's packing formula
+(`(r&0xF8)<<8 | (g&0xFC)<<3 | b>>3`) was mathematically correct - it was; (2) added a
+compile-time `COLOR_TEST` diagnostic (`webRAW-CYD.cpp`, guarded by `#define
+COLOR_TEST 0/1`) that draws hardcoded RGB565 swatches directly on boot, no WiFi/
+streaming involved - first via `tft.fillRect()` (showed a real, if subtle, difference,
+ruling out a panel/driver bit-depth ceiling), then rewritten to go through
+`tft.pushImage()` from a malloc'd buffer instead, matching `drawRawStrips()`'s actual
+call shape exactly (also rendered distinctly, ruling out that code path too); (3) built
+a static HTML test page with bands colored to reproduce the exact reported RGB565
+values after quantization, shared it through the *real* end-to-end pipeline (actual
+`getDisplayMedia()` capture, not a synthetic buffer) - also rendered distinctly. With
+packing, decompression+pushImage, and the full real capture pipeline all independently
+confirmed correct, the original observation was almost certainly just human
+perception: RGB565 has its coarsest quantization (5 bits R, 6 bits G, 5 bits B) right
+at the high-luminance/near-white end, and pale, low-saturation content is exactly
+where banding is hardest to see past versus genuinely identical. Lesson: when a
+reported bug survives contact with "convert conditions to a synthetic test I can run
+in isolation," check the pipeline stage-by-stage with the *narrowest* possible
+reproduction at each stage (hardcoded values, then real API calls, then real capture)
+before assuming the bug is real and hunting for it in code that may be innocent -
+three independently-clean isolation tests is strong evidence, not a coincidence.
+
 ## Capture resolution and rotation blur (stream.html)
 
 **A blurry *preview* pointed at the capture request, not the canvas/rotation code -

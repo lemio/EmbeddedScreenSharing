@@ -76,6 +76,12 @@ String buildDateString() {
     return d;
 }
 
+// See webJPEG.cpp's identical firmwareBuildDate for the full explanation - read (not
+// patched) by the browser flasher to show a build date in the firmware list.
+// __attribute__((used)): without it the linker strips this as an unused symbol and
+// it never makes it into firmware.bin - confirmed the hard way.
+const char firmwareBuildDate[32] __attribute__((used)) = "|*FW*|" __DATE__ "|*FW*|";
+
 // Shown as a QR code so the user can find help/docs if WiFi connection fails
 const char githubRepoUrl[] = "https://github.com/lemio/EmbeddedScreenSharing";
 
@@ -626,6 +632,10 @@ void setupWebServer() {
 void setup()
 {
     Serial.begin(115200);
+    // See webJPEG.cpp's identical line for why this print exists at all - it's not
+    // just a log line, it's what keeps firmwareBuildDate from being discarded by the
+    // linker's --gc-sections as an unreferenced symbol.
+    LOGF("Build marker: %s\n", firmwareBuildDate);
     LOGLN("Starting webJPEG-CYD display...");
 
     delay(3000);

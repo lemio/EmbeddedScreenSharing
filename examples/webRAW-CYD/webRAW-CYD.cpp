@@ -55,6 +55,20 @@
 #include <AsyncWebSocket.h>
 #include "qrcodegen.h"
 
+// Temporary diagnostic: flip to 1, flash, and look at the screen - no WiFi, no
+// streaming, just tft.fillRect() with hardcoded RGB565 values straight after
+// tft.init()/setSwapBytes(true). Exists to answer a specific question: distinct
+// RGB565 values sent from the browser (packed correctly - verified by hand) were
+// reported rendering identically on this board. This bypasses the entire
+// browser->WebSocket->deflate->tinfl_decompress_mem_to_mem->pushImage() pipeline,
+// going straight from a hardcoded uint16_t to the same low-level TFT_eSPI color-write
+// path pushImage() itself uses. If the swatches are STILL indistinguishable here,
+// the bug is in TFT_eSPI's config or the panel itself, not in this file's pipeline -
+// if they're clearly distinct here, the bug is upstream (packing/compression/
+// decompression). Flip back to 0 and reflash once done - this is not meant to stay
+// enabled.
+#define COLOR_TEST 0
+
 extern "C" {
 #include "esp32/rom/miniz.h"
 }
@@ -86,6 +100,17 @@ String buildDateString() {
     return d;
 }
 
+// See webJPEG.cpp's identical firmwareBuildDate for the full explanation - read (not
+// patched) by the browser flasher to show a build date in the firmware list. Kept
+// entirely separate from buildDateString() above (which feeds the on-device LCD via
+// tft.drawString()) - an earlier version of this file appended the marker directly
+// onto buildDateString()'s own return value, which would have made "|*FW*|" show up
+// on the physical screen alongside the date instead of staying confined to the raw
+// compiled binary the flasher scans. __attribute__((used)): without it the linker
+// strips this as an unused symbol and it never makes it into firmware.bin - confirmed
+// the hard way.
+const char firmwareBuildDate[32] __attribute__((used)) = "|*FW*|" __DATE__ "|*FW*|";
+
 const char githubRepoUrl[] = "https://github.com/lemio/EmbeddedScreenSharing";
 
 const char boardName[] = "CYD ESP32-2432S028R (2.8in ILI9341) - RAW";
@@ -93,9 +118,6 @@ const char boardName[] = "CYD ESP32-2432S028R (2.8in ILI9341) - RAW";
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws-raw");
 
-// Tracks the single active viewer so loop() can nudge it directly - see
-// ACK_NUDGE_INTERVAL_MS below for why.
-AsyncWebSocketClient* activeClient = nullptr;
 volatile uint32_t lastDataActivityMs = 0;
 
 // If "Wait for device ack" mode's ack (client->text("a") below) is ever lost or
@@ -108,6 +130,20 @@ volatile uint32_t lastDataActivityMs = 0;
 // the browser at all, since the browser's own stall timer only fires after this
 // (2000ms < the browser's 3000ms), so a legitimate resend normally wins that race
 // instead of the browser forcing a blind retry.
+//
+// This used to cache the connected client as a raw `AsyncWebSocketClient*`
+// (`activeClient`), written from the WS event handler (which runs on AsyncTCP's own
+// task) and read+dereferenced from loop() (the separate Arduino main task) with no
+// synchronization at all - a genuine cross-task data race on the pointer itself, and
+// on the AsyncWebSocketClient object's lifetime (freed on disconnect, potentially
+// while loop() was mid-dereference on another core/task). Confirmed as a real crash
+// on real hardware: "Mutex busy - frame dropped" immediately followed by a
+// LoadProhibited panic inside AsyncWebSocketClient::text()'s internal mutex lock,
+// with garbage-looking register values consistent with heap corruption rather than a
+// clean null-pointer deref. Fixed by never caching a raw client pointer across tasks
+// at all - ws.textAll() below asks the AsyncWebSocket object itself (which manages
+// its own client list with proper internal locking) to message whichever client(s)
+// are actually still connected, so there's no pointer of ours to go stale.
 static const uint32_t ACK_NUDGE_INTERVAL_MS = 2000;
 
 // Same hardcoded-not-tft.width() reasoning as webJPEG-CYD.cpp - see that file's
@@ -369,15 +405,11 @@ void setupWebServer() {
                    AwsEventType type, void *arg, uint8_t *data, size_t len) {
         if (type == WS_EVT_CONNECT) {
             LOGF("WebSocket client #%u connected from %s\n", client->id(), client->remoteIP().toString().c_str());
-            activeClient = client;
             lastDataActivityMs = millis();
         } else if (type == WS_EVT_DISCONNECT) {
             LOGF("WebSocket client #%u disconnected\n", client->id());
             wsAssemblySize = 0;
             wsExpectedSize = 0;
-            if (activeClient == client) {
-                activeClient = nullptr;
-            }
         } else if (type == WS_EVT_DATA) {
             AwsFrameInfo *info = (AwsFrameInfo*)arg;
 
@@ -435,6 +467,10 @@ void setupWebServer() {
 void setup()
 {
     Serial.begin(115200);
+    // See webJPEG.cpp's identical line for why this print exists at all - it's not
+    // just a log line, it's what keeps firmwareBuildDate from being discarded by the
+    // linker's --gc-sections as an unreferenced symbol.
+    LOGF("Build marker: %s\n", firmwareBuildDate);
     LOGLN("Starting webRAW-CYD display...");
 
     delay(3000);
@@ -443,6 +479,41 @@ void setup()
     tft.setRotation(0);
     tft.setSwapBytes(true);
     tft.fillScreen(TFT_BLACK);
+
+#if COLOR_TEST
+    // The 4 values reported rendering identically, plus pure R/G/B/white/black as a
+    // sanity check that those still look distinct from each other. Each swatch is
+    // labeled with its hex value in the browser's raw uint16_t log for one-to-one
+    // comparison against what's on screen.
+    // First version of this test used tft.fillRect() and found a real (if subtle)
+    // difference between these swatches - meaning the panel/driver on its own isn't
+    // the bottleneck. But fillRect() and pushImage() are different TFT_eSPI code
+    // paths (pushImage() is what drawRawStrips() actually calls, typically
+    // DMA-backed) - this version pushes each swatch through a small malloc'd buffer
+    // via tft.pushImage(0, y, WIDTH, STRIP_ROWS, buffer), matching drawRawStrips()'s
+    // exact call shape, to check whether the bug is specific to that path instead.
+    struct { uint16_t color; const char *label; } swatches[] = {
+        {0xf75a, "f75a"}, {0xf7bb, "f7bb"}, {0xff59, "ff59"}, {0xefbf, "efbf"},
+        {0xF800, "RED"},  {0x07E0, "GRN"},  {0x001F, "BLU"},
+        {0xFFFF, "WHT"},  {0x0000, "BLK"},
+    };
+    const int n = sizeof(swatches) / sizeof(swatches[0]);
+    uint16_t *band = (uint16_t*)malloc((size_t)WIDTH * STRIP_ROWS * sizeof(uint16_t));
+    if (!band) {
+        LOGLN("COLOR_TEST: band buffer allocation failed");
+        while (1) { delay(1000); }
+    }
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    for (int i = 0; i < n; i++) {
+        for (int p = 0; p < WIDTH * STRIP_ROWS; p++) band[p] = swatches[i].color;
+        tft.pushImage(0, i * STRIP_ROWS, WIDTH, STRIP_ROWS, band);
+        tft.drawString(swatches[i].label, 4, i * STRIP_ROWS + 4, 1);
+        LOGF("COLOR_TEST band %d: 0x%04x (%s) at y=%d\n", i, swatches[i].color, swatches[i].label, i * STRIP_ROWS);
+    }
+    free(band);
+    LOGLN("COLOR_TEST: done drawing, halting here (no WiFi, no streaming)");
+    while (1) { delay(1000); }
+#endif
 
     frameMutex = xSemaphoreCreateMutex();
 
@@ -509,8 +580,8 @@ void loop()
         lastCheck = now;
     }
 
-    if (activeClient != nullptr && (now - lastDataActivityMs > ACK_NUDGE_INTERVAL_MS)) {
-        activeClient->text("a");
+    if (ws.count() > 0 && (now - lastDataActivityMs > ACK_NUDGE_INTERVAL_MS)) {
+        ws.textAll("a");
         lastDataActivityMs = now;
         LOGLN("RAW: no data received in a while - resending ack in case the last one was lost/delayed");
     }
