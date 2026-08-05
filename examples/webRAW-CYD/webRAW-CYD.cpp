@@ -433,7 +433,18 @@ void setupWebServer() {
             }
 
             memcpy(wsAssemblyBuffer + info->index, data, len);
-            wsAssemblySize += len;
+            // High-water mark (highest byte offset written so far), not `+= len` - a
+            // running sum silently desyncs from what's actually in wsAssemblyBuffer if
+            // any chunk is ever redelivered/out-of-order/overlapping (AsyncTCP doesn't
+            // contractually rule this out), which would let a message with real gaps
+            // (stale/garbage bytes sitting unwritten in the middle) look "complete" once
+            // the sum coincidentally reaches wsExpectedSize. drawRawStrips() would then
+            // read those stale bytes as a strip header - exactly the kind of impossible
+            // compressed-length values seen crashing this on real hardware (see
+            // learnings.md).
+            if (info->index + len > wsAssemblySize) {
+                wsAssemblySize = info->index + len;
+            }
 
             if (!info->final || wsAssemblySize != wsExpectedSize) {
                 return;
@@ -452,9 +463,21 @@ void setupWebServer() {
                 LOGF("Mutex busy - frame dropped (Recv=%lums)\n", (uint32_t)(millis() - wsRecvStartMs));
             }
 
-            // See webJPEG.cpp's identical comment - tiny flow-control ack,
-            // unconditional, acted on only when stream.html's Ack Mode is "wait".
-            client->text("a");
+            // See webJPEG.cpp's identical comment - tiny flow-control ack, acted on
+            // only when stream.html's Ack Mode is "wait". Guarded by status(), unlike
+            // the unconditional version this used to be: confirmed on real hardware
+            // that a client can still have a WS_EVT_DATA callback in flight (already
+            // queued/dispatching on the async task) right as the same connection's
+            // disconnect is processed - calling client->text() on it then walks into
+            // AsyncWebSocketClient::_queueMessage()'s mutex lock on a torn-down object
+            // and hard-crashes (LoadProhibited deep in _queueMessage's recursive_mutex
+            // lock - see learnings.md for the full backtrace). status() is a plain
+            // field read, not a queue/mutex operation, so it's safe to check even this
+            // late - AsyncWebSocketClient::_onDisconnect() sets WS_DISCONNECTED before
+            // tearing anything else down.
+            if (client->status() == WS_CONNECTED) {
+                client->text("a");
+            }
         }
     });
 

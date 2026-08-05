@@ -663,8 +663,17 @@
                 ws = new WebSocket(wsUrl);
                 ws.binaryType = 'arraybuffer';
 
+                // Per-connection-attempt flag, not the shared wsConnected - see
+                // connectRawWebSocket()'s identical flag for why: onerror always fires
+                // before onclose for an abnormal closure, and onerror used to clear
+                // wsConnected itself, so onclose's `wasConnected` check always read
+                // false whenever onerror had fired first - silently defeating the
+                // reconnect gate on any error-preceded disconnect, JPEG or RAW alike.
+                let wasEverOpen = false;
+
                 ws.onopen = () => {
                     wsConnected = true;
+                    wasEverOpen = true;
                     reconnectAttempts = 0;
                     reconnectDelay = 2000;
                     console.log('WebSocket connected!');
@@ -673,16 +682,16 @@
 
                 ws.onerror = (error) => {
                     console.error('WebSocket error:', error);
-                    wsConnected = false;
                     reject(error);
+                    // Don't touch wsConnected here - onclose is authoritative, see
+                    // wasEverOpen's comment above.
                 };
 
                 ws.onclose = () => {
                     console.log('WebSocket closed');
-                    const wasConnected = wsConnected;
                     wsConnected = false;
 
-                    if (streaming && wasConnected) {
+                    if (streaming && wasEverOpen) {
                         updateStatus('Connection lost - attempting to reconnect...', 'warning');
                         attemptJpegReconnect();
                     }
@@ -722,7 +731,11 @@
                     await connectJpegWebSocket();
                     updateStatus('Reconnected successfully!', 'success');
                 } catch (err) {
+                    // See attemptRawReconnect()'s identical chain-into-another-attempt
+                    // comment - a retry that never reaches onopen won't set
+                    // wasEverOpen, so its own onclose won't retry on its own.
                     console.error('Reconnection failed:', err);
+                    attemptJpegReconnect();
                 }
             }, currentDelay);
         }
@@ -1266,6 +1279,20 @@
         // (see learnings.md), which is exactly this scenario, not a hypothetical.
         let rawStallWatchdog = null;
 
+        // Mirrors JPEG mode's reconnectAttempts/reconnectDelay/attemptJpegReconnect -
+        // RAW mode used to just call stopRawStreaming() on any WS close, which meant a
+        // rare device/library-side WS hiccup (e.g. a malformed close frame from a
+        // low-level frame-parser edge case - see learnings.md) killed the whole stream
+        // instead of just the one connection. The screen-capture MediaStream itself
+        // (video.srcObject) isn't affected by a WS drop, so reconnecting the socket
+        // alone is enough - sendRawFrame()'s existing `!wsConnected` guard already
+        // makes the in-flight setTimeout/ack chain resume on its own once wsConnected
+        // flips back to true, same as JPEG mode.
+        let rawReconnectAttempts = 0;
+        const maxRawReconnectAttempts = 10;
+        let rawReconnectDelay = 2000;
+        let rawReconnectTimer = null;
+
         // Compresses `bytes` as a standalone raw deflate stream (no zlib/gzip
         // header/trailer - matches tinfl_decompress_mem_to_mem()'s flags=0 on the
         // device, see webRAW-CYD.cpp's drawRawStrips()). Reads cs.readable directly
@@ -1307,26 +1334,42 @@
                 ws = new WebSocket(wsUrl);
                 ws.binaryType = 'arraybuffer';
 
+                // Per-connection-attempt flag, not the shared wsConnected - onerror
+                // always fires before onclose for an abnormal closure (which the
+                // "broken close frame" disconnect always is - see learnings.md), and
+                // onerror used to set wsConnected = false itself, so by the time
+                // onclose ran, wsConnected already read false regardless of whether
+                // this connection had actually been streaming for a while first. That
+                // silently defeated the `wasConnected` reconnect gate below on every
+                // single occurrence of that error - confirmed on real hardware: the
+                // stream just stopped, no retry, no error surfaced to the user. This
+                // local flag is immune to that ordering since only onopen sets it.
+                let wasEverOpen = false;
+
                 ws.onopen = () => {
                     wsConnected = true;
+                    wasEverOpen = true;
+                    rawReconnectAttempts = 0;
+                    rawReconnectDelay = 2000;
                     console.log('Raw WebSocket connected!');
                     resolve();
                 };
 
                 ws.onerror = (error) => {
                     console.error('WebSocket error:', error);
-                    wsConnected = false;
                     reject(error);
+                    // Don't touch wsConnected here - onclose (which always follows) is
+                    // the single authoritative place that transitions it to false; see
+                    // wasEverOpen's comment above for why this used to be a bug.
                 };
 
                 ws.onclose = () => {
                     console.log('Raw WebSocket closed');
                     wsConnected = false;
-                    if (streaming) {
-                        updateStatus('Connection lost', 'warning');
-                        stopRawStreaming();
-                        activeMode = null;
-                        applyModeUI();
+
+                    if (streaming && wasEverOpen) {
+                        updateStatus('Connection lost - attempting to reconnect...', 'warning');
+                        attemptRawReconnect();
                     }
                 };
 
@@ -1338,6 +1381,44 @@
                     if (streaming) sendRawFrame();
                 };
             });
+        }
+
+        // Mirrors attemptJpegReconnect() exactly - see rawReconnectAttempts' comment
+        // above for why RAW mode needs this at all.
+        function attemptRawReconnect() {
+            if (!streaming) return;
+
+            if (rawReconnectAttempts >= maxRawReconnectAttempts) {
+                updateStatus('Max reconnection attempts reached', 'error');
+                stopRawStreaming();
+                activeMode = null;
+                applyModeUI();
+                return;
+            }
+
+            rawReconnectAttempts++;
+            updateStatus(`Reconnecting (attempt ${rawReconnectAttempts}/${maxRawReconnectAttempts})...`, 'warning');
+
+            if (rawReconnectTimer) clearTimeout(rawReconnectTimer);
+
+            const currentDelay = Math.min(rawReconnectDelay * Math.pow(1.5, rawReconnectAttempts - 1), 30000);
+
+            rawReconnectTimer = setTimeout(async () => {
+                try {
+                    await connectRawWebSocket();
+                    updateStatus('Reconnected successfully!', 'success');
+                } catch (err) {
+                    // The retry attempt itself failed to even establish (e.g. mDNS
+                    // hadn't caught up yet, or the device was still mid-cleanup from
+                    // the previous abrupt close) - explicitly chain into another
+                    // attempt here rather than relying on this failed connection's own
+                    // onclose to do it, since a connection that never opened doesn't
+                    // set wasEverOpen and so won't retry on its own. Bounded by the
+                    // same maxRawReconnectAttempts check at the top of this function.
+                    console.error('Raw reconnection failed:', err);
+                    attemptRawReconnect();
+                }
+            }, currentDelay);
         }
 
         async function startRawStreaming() {
@@ -1427,6 +1508,12 @@
         function stopRawStreaming() {
             streaming = false;
             rawFrameInFlight = false;
+
+            if (rawReconnectTimer) {
+                clearTimeout(rawReconnectTimer);
+                rawReconnectTimer = null;
+            }
+            rawReconnectAttempts = 0;
 
             if (rawStallWatchdog) {
                 clearInterval(rawStallWatchdog);

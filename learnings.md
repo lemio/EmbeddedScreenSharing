@@ -513,6 +513,36 @@ reproduction at each stage (hardcoded values, then real API calls, then real cap
 before assuming the bug is real and hunting for it in code that may be innocent -
 three independently-clean isolation tests is strong evidence, not a coincidence.
 
+**Calling `client->text()` unconditionally at the end of every WS_EVT_DATA callback
+crashed with a `LoadProhibited` deep inside ESPAsyncWebServer's own mutex lock, on
+real hardware, under sustained high-throughput streaming.** Confirmed via a fully
+symbolicated backtrace (this toolchain resolves ESP32 addresses to source
+lines/inlines out of the box): `AsyncWebSocketClient::text()` ->
+`_queueMessage()` -> `std::unique_lock<std::recursive_mutex>::lock()` ->
+`pthread_mutex_lock` -> `xQueueSemaphoreTake`, faulting on a garbage address
+(`0xad567861` - not a valid ESP32 SRAM address, i.e. freed/stale memory, not a null
+pointer) while trying to take `client`'s own `_queue_lock`. The log line immediately
+before every occurrence was that same client disconnecting. Root cause (from reading
+ESPAsyncWebServer's own source, `AsyncWebSocket.cpp`'s `_onDisconnect()`/
+`_handleDataEvent()`): a WS_EVT_DATA callback can still be mid-flight (already
+dispatched to application code) for a connection whose disconnect has, by that point,
+already been processed elsewhere in the async task's event queue - the object backing
+`client` is at best mid-teardown, at worst already freed, by the time our own callback
+gets around to calling `client->text("a")` at the very end. Fixed by checking
+`client->status() == WS_CONNECTED` immediately before every `client->text()` call
+in both webJPEG-CYD.cpp and webRAW-CYD.cpp (both handlers in the latter) -
+`status()` is a plain field read, not a queue/mutex operation, so it stays safe to
+call even this late; `_onDisconnect()` sets `WS_DISCONNECTED` before touching
+anything else. This wasn't reachable in earlier, lower-throughput testing (webJPEG
+mode's ~3-6fps) - it took webRAW's much higher message rate (15+ fps, every frame a
+fresh WS_EVT_DATA dispatch) to make the disconnect-vs-in-flight-callback race actually
+land during a real session. Lesson: an unconditional "send a reply inside the event
+callback that just received a message" pattern is only as safe as the framework's
+guarantee that the callback's own connection object outlives the callback - that
+guarantee doesn't hold here under load, and the failure mode is a hard crash with a
+backtrace that (without symbolication) looks like generic heap corruption anywhere in
+the WiFi/TCP stack, not an obvious pointer-into-application-code bug.
+
 ## Capture resolution and rotation blur (stream.html)
 
 **A blurry *preview* pointed at the capture request, not the canvas/rotation code -
@@ -567,6 +597,31 @@ two real bugs can contribute to one reported symptom; fixing the first one you f
 (and confirming it's real) doesn't mean the report is fully explained - "that is a lot
 better" after the *second* fix (the capture resolution one) is what actually confirmed
 the investigation was complete, not either fix in isolation.
+
+**A device-side WebSocket protocol error (ESPAsyncWebServer's own low-level frame
+parser closing the connection with raw binary bytes as the close reason - Chrome
+correctly rejects that as "Received a broken close frame containing invalid UTF-8")
+turned out to be compounded by a real bug in this repo's own reconnect logic, not just
+the device-side error itself.** First fix (giving webRAW mode the same auto-reconnect
+`attemptRawReconnect()` pattern webJPEG mode already had) turned out to be necessary
+but not sufficient - the stream still died permanently on this exact error. Root cause
+in the reconnect logic itself: `ws.onerror` always fires before `ws.onclose` for an
+abnormal closure (which this always is), and `onerror` used to set the shared
+`wsConnected = false` itself; by the time `onclose` read that same variable into
+`wasConnected` to decide whether to retry, it had *already* been cleared by the
+preceding `onerror` - so the reconnect gate read `false` on literally every occurrence
+of this specific error, no matter how long the stream had been running successfully
+beforehand. Fixed by tracking "did this connection ever successfully open" as a local
+variable captured in `connectRawWebSocket()`/`connectJpegWebSocket()`'s own closure
+(`wasEverOpen`, set only by `onopen`) instead of reading the shared, order-sensitive
+`wsConnected`; also made a reconnect *attempt* that itself fails to establish chain
+directly into another attempt (rather than depending on that failed attempt's own
+`onclose`, which never had a `wasEverOpen` to work with in the first place). Lesson:
+when a reconnect/retry mechanism looks structurally right but a specific failure mode
+still doesn't recover, check literally what values are read at the moment of the
+recovery decision and in what order they were last written - "the retry logic exists"
+and "the retry logic actually fires for this exact error" are different claims, and
+event-ordering bugs like this are invisible from reading the retry function alone.
 
 ## General
 

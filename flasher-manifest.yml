@@ -197,6 +197,7 @@ examples:
       - Live serial output below shows connection status and per-frame timing in real time
 
   webRAW-CYD:
+    recommended: true
     name: WebRAW Stream Display (CYD)
     description: >-
       Streams a browser tab, window, or screen share to the same CYD board as

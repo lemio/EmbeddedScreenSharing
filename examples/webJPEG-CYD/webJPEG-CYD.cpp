@@ -538,7 +538,11 @@ void setupWebServer() {
             }
 
             memcpy(wsAssemblyBuffer + info->index, data, len);
-            wsAssemblySize += len;
+            // High-water mark, not `+= len` - see webRAW-CYD.cpp's identical fix for why
+            // a running sum can silently desync from what's actually in the buffer.
+            if (info->index + len > wsAssemblySize) {
+                wsAssemblySize = info->index + len;
+            }
 
             if (!info->final || wsAssemblySize != wsExpectedSize) {
                 return;
@@ -558,12 +562,17 @@ void setupWebServer() {
 
             // Tiny flow-control signal, same convention as webH264.cpp: any WS message
             // back to the browser means "done with that frame, send another whenever
-            // you like" - sent unconditionally (whether the frame rendered or got
-            // dropped for the mutex) so the browser can pace itself to what the device
-            // can actually keep up with instead of firing blind at a fixed interval.
-            // Harmless to clients not using it - stream.html only acts on this when
-            // its Ack Mode option is set to wait for it (see that file).
-            client->text("a");
+            // you like" (whether the frame rendered or got dropped for the mutex) so
+            // the browser can pace itself to what the device can actually keep up with
+            // instead of firing blind at a fixed interval. Harmless to clients not
+            // using it - stream.html only acts on this when its Ack Mode option is set
+            // to wait for it (see that file). Guarded by status() - see
+            // webRAW-CYD.cpp's identical guard for the real hardware crash
+            // (LoadProhibited inside _queueMessage's mutex lock on a torn-down client)
+            // this closes.
+            if (client->status() == WS_CONNECTED) {
+                client->text("a");
+            }
         }
     });
 
@@ -600,7 +609,11 @@ void setupWebServer() {
             }
 
             memcpy(wsMonoAssemblyBuffer + info->index, data, len);
-            wsMonoAssemblySize += len;
+            // High-water mark, not `+= len` - see webRAW-CYD.cpp's identical fix for why
+            // a running sum can silently desync from what's actually in the buffer.
+            if (info->index + len > wsMonoAssemblySize) {
+                wsMonoAssemblySize = info->index + len;
+            }
 
             if (!info->final || wsMonoAssemblySize != wsMonoExpectedSize) {
                 return;
@@ -619,7 +632,9 @@ void setupWebServer() {
             }
 
             // See the color handler's identical comment above.
-            client->text("a");
+            if (client->status() == WS_CONNECTED) {
+                client->text("a");
+            }
         }
     });
 
