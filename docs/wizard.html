@@ -500,7 +500,8 @@
             gap: 8px;
         }
 
-        .variable-input-wrapper input {
+        .variable-input-wrapper input,
+        .variable-input-wrapper select {
             flex: 1;
             padding: 8px 12px;
             border: 1px solid #e5e7eb;
@@ -508,14 +509,17 @@
             font-size: 0.85em;
             font-family: 'SF Mono', Monaco, 'Courier New', monospace;
             transition: all 0.15s ease;
+            background: #fff;
         }
 
-        .variable-input-wrapper input:focus {
+        .variable-input-wrapper input:focus,
+        .variable-input-wrapper select:focus {
             outline: none;
             border-color: #1a1a1a;
         }
 
-        .variable-input-wrapper input:hover {
+        .variable-input-wrapper input:hover,
+        .variable-input-wrapper select:hover {
             border-color: #d1d5db;
         }
 
@@ -979,6 +983,7 @@
     <script type="module">
         import { Transport, ESPLoader } from 'https://unpkg.com/esptool-js@0.5.7/bundle.js';
         import { CONFIG, FIRMWARE_CONFIGS } from './config.js';
+        import { POSIX_TZ_DB, POSIX_TZ_ALIASES } from './posix_tz_db.js';
 
         // ==================== STATE ====================
         
@@ -1236,7 +1241,15 @@
                 const input = document.querySelector(`[data-firmware-name="${variable.firmware_name}"]`);
                 if (!input) continue;
 
-                const value = input.value;
+                // For type: "timezone", input.value is the IANA zone name shown in the
+                // dropdown (e.g. "America/New_York") - firmware needs the POSIX TZ
+                // string instead (e.g. "EST5EDT,M3.2.0,M11.1.0"), so look it up here,
+                // right before patching, rather than storing the POSIX string as the
+                // select's own value (which would make same-rule zones like
+                // America/New_York and America/Detroit indistinguishable in the UI).
+                const value = variable.type === 'timezone'
+                    ? (POSIX_TZ_DB[input.value] || POSIX_TZ_DB[POSIX_TZ_ALIASES[input.value]] || 'UTC0')
+                    : input.value;
                 const searchString = variable.firmware_name;
                 const maxLen = variable.max_length || 100;
                 
@@ -1516,27 +1529,73 @@
             
             config.variables.forEach((v, i) => {
                 const value = storage.get(v.firmware_name, v.default_value);
+                const labelClass = 'style="font-size: 0.8em; margin-bottom: 4px; color: #1a1a1a;"';
+
+                if (v.type === 'enum' && Array.isArray(v.options)) {
+                    const optionsHtml = v.options.map(opt => {
+                        const optValue = typeof opt === 'object' ? opt.value : opt;
+                        const optLabel = typeof opt === 'object' ? (opt.label || opt.value) : opt;
+                        return `<option value="${optValue}" ${optValue === value ? 'selected' : ''}>${optLabel}</option>`;
+                    }).join('');
+                    html += `
+                        <div class="variable-input-group">
+                            <label for="var_${i}" ${labelClass}>${v.readable_name}</label>
+                            <div class="variable-input-wrapper">
+                                <select id="var_${i}" data-firmware-name="${v.firmware_name}">${optionsHtml}</select>
+                                ${v.postfix ? `<span class="postfix">${v.postfix}</span>` : ''}
+                            </div>
+                        </div>`;
+                    return;
+                }
+
+                if (v.type === 'timezone') {
+                    // Value stored/selected here is the IANA zone name (e.g.
+                    // "America/New_York") - readable, and what the browser's own APIs
+                    // speak. replaceVariables() converts it to the POSIX TZ string
+                    // firmware actually needs via POSIX_TZ_DB at patch time, so a
+                    // localStorage override (an explicit prior user choice) always wins
+                    // over browser auto-detection, same precedence as every other
+                    // variable type - see storage.get() below.
+                    let browserZone = 'UTC';
+                    try { browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch (e) { /* ignore */ }
+                    const zones = (typeof Intl.supportedValuesOf === 'function')
+                        ? Intl.supportedValuesOf('timeZone')
+                        : Object.keys(POSIX_TZ_DB).sort();
+                    const tzValue = storage.get(v.firmware_name, null) || browserZone || v.default_value || 'UTC';
+                    const optionsHtml = zones.map(z => `<option value="${z}" ${z === tzValue ? 'selected' : ''}>${z}</option>`).join('');
+                    html += `
+                        <div class="variable-input-group">
+                            <label for="var_${i}" ${labelClass}>${v.readable_name}</label>
+                            <div class="variable-input-wrapper">
+                                <select id="var_${i}" data-firmware-name="${v.firmware_name}">${optionsHtml}</select>
+                                ${v.postfix ? `<span class="postfix">${v.postfix}</span>` : ''}
+                            </div>
+                        </div>`;
+                    return;
+                }
+
                 const isPassword = v.readable_name.toLowerCase().includes('password');
                 const inputType = (hidePassword && isPassword) ? 'password' : 'text';
-                const labelClass = (hidePassword && isPassword) ? 'style="font-size: 0.8em; margin-bottom: 4px; color: #1a1a1a; filter: blur(4px); user-select: none;"' : 'style="font-size: 0.8em; margin-bottom: 4px; color: #1a1a1a;"';
-                
+                const passwordLabelClass = (hidePassword && isPassword) ? 'style="font-size: 0.8em; margin-bottom: 4px; color: #1a1a1a; filter: blur(4px); user-select: none;"' : labelClass;
+
                 html += `
                     <div class="variable-input-group">
-                        <label for="var_${i}" ${labelClass}>${v.readable_name}</label>
+                        <label for="var_${i}" ${passwordLabelClass}>${v.readable_name}</label>
                         <div class="variable-input-wrapper">
-                            <input type="${inputType}" id="var_${i}" value="${value}" maxlength="${v.max_length || 100}" 
+                            <input type="${inputType}" id="var_${i}" value="${value}" maxlength="${v.max_length || 100}"
                                    data-firmware-name="${v.firmware_name}"
                                    ${hidePassword && isPassword ? 'style="filter: blur(4px);"' : ''}>
                             ${v.postfix ? `<span class="postfix">${v.postfix}</span>` : ''}
                         </div>
                     </div>`;
             });
-            
+
             container.innerHTML = html;
 
             config.variables.forEach((v, i) => {
                 const input = document.getElementById(`var_${i}`);
-                input.addEventListener('input', (e) => storage.set(v.firmware_name, e.target.value));
+                const eventName = ((v.type === 'enum' && Array.isArray(v.options)) || v.type === 'timezone') ? 'change' : 'input';
+                input.addEventListener(eventName, (e) => storage.set(v.firmware_name, e.target.value));
             });
         };
 
@@ -1876,7 +1935,11 @@
                         const input = document.querySelector(`[data-firmware-name="${variable.firmware_name}"]`);
                         if (input) {
                             const value = input.value;
-                            const displayValue = variable.postfix ? `${value}${variable.postfix}` : value;
+                            let displayValue = variable.postfix ? `${value}${variable.postfix}` : value;
+                            if (variable.type === 'enum' && Array.isArray(variable.options)) {
+                                const match = variable.options.find(opt => (typeof opt === 'object' ? opt.value : opt) === value);
+                                if (match) displayValue = typeof match === 'object' ? (match.label || match.value) : match;
+                            }
                             const isPassword = variable.readable_name.toLowerCase().includes('password');
                             const isMdns = variable.readable_name.toLowerCase().includes('mdns');
                             const valueStyle = (hidePassword && isPassword) ? 'style="filter: blur(4px); user-select: none;"' : '';
