@@ -191,6 +191,26 @@ examples:
         default_value: esp-screen
         postfix: .local
         max_length: 100
+      - firmware_name: "|*ROTATION*|"
+        readable_name: Screen Rotation
+        type: enum
+        options:
+          - value: "0"
+            label: Normal
+          - value: "2"
+            label: Upside down
+        default_value: "0"
+        max_length: 16
+      - firmware_name: "|*INVERT*|"
+        readable_name: Invert Colors
+        type: enum
+        options:
+          - value: "0"
+            label: Normal
+          - value: "1"
+            label: Inverted (some CYD variants need this)
+        default_value: "0"
+        max_length: 16
     expectedBehavior:
       - Device connects to WiFi and shows its IP address and mDNS hostname on screen
       - Open the streaming page linked above and share a browser tab, camera, or your whole screen
@@ -221,6 +241,26 @@ examples:
         default_value: esp-screen
         postfix: .local
         max_length: 100
+      - firmware_name: "|*ROTATION*|"
+        readable_name: Screen Rotation
+        type: enum
+        options:
+          - value: "0"
+            label: Normal
+          - value: "2"
+            label: Upside down
+        default_value: "0"
+        max_length: 16
+      - firmware_name: "|*INVERT*|"
+        readable_name: Invert Colors
+        type: enum
+        options:
+          - value: "0"
+            label: Normal
+          - value: "1"
+            label: Inverted (some CYD variants need this)
+        default_value: "0"
+        max_length: 16
     expectedBehavior:
       - Device connects to WiFi and shows its IP address and mDNS hostname on screen
       - Open the streaming page linked above and share a browser tab, window, or your whole screen

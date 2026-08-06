@@ -623,6 +623,34 @@ recovery decision and in what order they were last written - "the retry logic ex
 and "the retry logic actually fires for this exact error" are different claims, and
 event-ordering bugs like this are invisible from reading the retry function alone.
 
+**The underlying heap corruption behind the "broken close frame" error is inside
+AsyncTCP/the WiFi driver itself, not this repo's code, and can hang the whole chip
+instead of rebooting.** Traced with a fully symbolicated crash: `CORRUPT HEAP: Bad
+tail` discovered inside `esf_buf_recycle`/`ppRecycleRxPkt`/`esp_wifi_internal_free_rx_buffer`,
+called from `pbuf_free()` inside `AsyncClient::_recv()` while freeing an *incoming*
+WiFi RX buffer - nowhere near this file's own reassembly code (already hardened twice
+this session) or the JS send path. A search of the AsyncTCP/ESPAsyncWebServer issue
+history (including the actively-maintained ESP32Async fork this repo already pins,
+not just the archived me-no-dev original) turned up multiple long-standing,
+still-unresolved reports of the same class of crash under sustained/high-frequency
+WebSocket binary traffic - this isn't unique to this repo's usage pattern. Worse than
+the other crashes in this file's history: this one left the device completely hung
+with no further serial output at all, rather than the usual "print backtrace, then
+reboot." Likely explanation: `esp_restart()`'s own graceful-shutdown path needs to
+stop the WiFi driver cleanly before actually resetting the chip, and that gets stuck
+waiting on the very WiFi-internal structure the corruption already damaged - the
+chip's compiled-in Interrupt WDT (NMI-based, should survive even a fully-halted CPU)
+apparently isn't recovering it either, which points at something more specific than a
+generic "stuck in a loop" hang. No code-level fix exists for the root cause from this
+side of the library boundary - added `esp_task_wdt_add(NULL)` on loopTask as a
+best-effort safety net (covers a *blocked-not-halted* variant of this hang, which the
+default idle-task-only Task WDT monitoring wouldn't catch), and the practical
+mitigation is reducing WS throughput (Ack Mode "wait", lower Frame Rate) below
+whatever threshold triggers it, not a fix in this repo's firmware or JS. If it
+recurs even at low throughput, this needs an upstream report to ESP32Async with this
+project's exact repro (large, frequent binary WS messages on a plain ESP32, no
+PSRAM), not more searching in this repo's own code.
+
 ## General
 
 **Comments should describe the code as it is, not the story of how it got there.**

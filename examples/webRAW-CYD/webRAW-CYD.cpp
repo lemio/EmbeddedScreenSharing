@@ -53,6 +53,7 @@
 #include <ESPmDNS.h>
 #include <ESPAsyncWebServer.h>
 #include <AsyncWebSocket.h>
+#include <esp_task_wdt.h>
 #include "qrcodegen.h"
 
 // Temporary diagnostic: flip to 1, flash, and look at the screen - no WiFi, no
@@ -90,6 +91,12 @@ const char password[100] = WIFI_PASSWORD;
 // Same shared "esp-screen" default as every other example in this repo now - see
 // webJPEG.cpp's identical comment for why.
 const char mdnsName[100] = "esp-screen";
+
+// Flash-time-patchable rotation/invert options - see webJPEG-CYD.cpp's identical
+// rotationStr/invertStr for the full explanation (byte-for-byte patch mechanism,
+// why only 0/180deg are ever applied, and the CYD2USB hardware-inversion background).
+const char rotationStr[16] = "|*ROTATION*|";
+const char invertStr[16] = "|*INVERT*|";
 
 // Shown on-device (WiFi connect/connected screens) - see webJPEG.cpp's identical
 // FW_VARIANT/buildDateString() for the full explanation.
@@ -499,7 +506,10 @@ void setup()
     delay(3000);
 
     tft.init();
-    tft.setRotation(0);
+    // See webJPEG-CYD.cpp's identical line for why only 0/180deg are ever applied
+    // here (90deg/270deg are confirmed broken on this panel, not just unimplemented).
+    tft.setRotation(atoi(rotationStr) == 2 ? 2 : 0);
+    tft.invertDisplay(atoi(invertStr) != 0);
     tft.setSwapBytes(true);
     tft.fillScreen(TFT_BLACK);
 
@@ -566,11 +576,29 @@ void setup()
     if (WiFi.status() == WL_CONNECTED) {
         setupWebServer();
     }
+
+    // Confirmed on real hardware: a heap-corruption assert originating inside
+    // AsyncTCP/the WiFi driver's own RX buffer recycling (esf_buf_recycle, called
+    // while freeing a pbuf in AsyncClient::_recv - not anywhere in this file's own
+    // code) can leave the whole chip hung with no further serial output at all,
+    // rather than the clean "print backtrace, then reboot" every other crash in this
+    // file's history has shown. Most likely explanation: esp_restart()'s own graceful
+    // shutdown tries to stop the WiFi driver cleanly before actually resetting, and
+    // that gets stuck waiting on the very structure the corruption already damaged -
+    // see learnings.md. The system-wide Interrupt WDT (CONFIG_ESP_INT_WDT, NMI-based)
+    // is already compiled in and should catch a true full halt regardless of what
+    // this file does, but subscribing loopTask to the Task WDT here too covers the
+    // case where loopTask itself ends up blocked waiting on something (a corrupted
+    // mutex, say) without the CPU being fully halted - a scenario the idle-task-only
+    // default monitoring (CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0) wouldn't catch on
+    // its own, since a blocked (not spinning) task doesn't starve the idle task.
+    esp_task_wdt_add(NULL);
 }
 
 void loop()
 {
     static unsigned long lastCheck = 0;
+    esp_task_wdt_reset();
 
     if (newFrameAvailable) {
         uint32_t startTime = millis();

@@ -67,6 +67,23 @@ const char password[100] = WIFI_PASSWORD;
 // webJPEG.cpp's identical comment for why.
 const char mdnsName[100] = "esp-screen";
 
+// Flash-time-patchable, same convention as ssid/password/mdnsName above (see the
+// browser flasher's replaceVariables() in ESP32-S3-Flasher-phase2/wizard.html for the
+// exact byte-for-byte patch mechanism) - unpatched (plain PlatformIO build/upload)
+// leaves these as non-numeric text, and atoi() on that returns 0, i.e. the same
+// rotation-0/not-inverted default this board always used before these existed.
+// Needed because CYD boards vary in ways firmware can't detect on its own:
+// - Rotation: only 0deg and 180deg are ever applied below, regardless of what value
+//   gets patched in - see setup()'s use of this for why (90deg/270deg are confirmed
+//   broken on this panel, not just unimplemented).
+// - Invert: some CYD variants (notably the two-USB-port "CYD2USB" clone) wire their
+//   panel with inverted colors at the hardware level - see
+//   https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display/blob/master/cyd.md's
+//   "My CYD has two USB ports" section, which documents the same fix
+//   (`tft.invertDisplay(1)`) this repo has no such board to test against itself.
+const char rotationStr[16] = "|*ROTATION*|";
+const char invertStr[16] = "|*INVERT*|";
+
 // Shown on-device (WiFi connect/connected screens) - see webJPEG.cpp's identical
 // FW_VARIANT/buildDateString() for the full explanation.
 #define FW_VARIANT "WebJPEG-CYD"
@@ -656,18 +673,23 @@ void setup()
     delay(3000);
 
     tft.init();
-    // Native orientation (portrait, 240x320) - deliberately NOT setRotation(1)/(3) for
-    // landscape. Confirmed on real hardware: setRotation(1) on this board's ILI9341
-    // doesn't actually rotate the panel's addressable window the way TFT_eSPI expects
-    // (a real, board-specific quirk, not a config mistake) - pushing a 320x240-shaped
-    // frame at rotation 1 showed up as portrait content with a corrupted/"noisy" band
-    // where the mismatched row width wrapped into the wrong scanlines. Rotation 0 is
-    // the panel's power-on-default orientation, so it's the one most likely to just
-    // work regardless of that quirk. Use stream.html's Rotation option (90deg/270deg)
-    // to get landscape-shaped content onto this board instead of fighting the panel's
-    // rotation register - that happens entirely in the browser, so it sidesteps this
-    // firmware-level issue completely. See learnings.md.
-    tft.setRotation(0);
+    // Native orientation (portrait, 240x320) by default - deliberately never
+    // setRotation(1)/(3) for landscape, flash-time-configurable or not. Confirmed on
+    // real hardware: setRotation(1) on this board's ILI9341 doesn't actually rotate
+    // the panel's addressable window the way TFT_eSPI expects (a real, board-specific
+    // quirk, not a config mistake) - pushing a 320x240-shaped frame at rotation 1
+    // showed up as portrait content with a corrupted/"noisy" band where the mismatched
+    // row width wrapped into the wrong scanlines. 0 and 2 (180deg) share the same
+    // underlying addressing mode as each other (only row/column mirroring differs,
+    // unlike 1/3 which also swap width/height), so 2 is offered as a "mounted upside
+    // down" option - clamped to just these two rather than passing rotationStr's value
+    // through directly, since any other value would hit the same broken mode. Use
+    // stream.html's Rotation option (90deg/270deg) to get landscape-shaped content
+    // onto this board instead of fighting the panel's rotation register - that happens
+    // entirely in the browser, so it sidesteps this firmware-level issue completely.
+    // See learnings.md.
+    tft.setRotation(atoi(rotationStr) == 2 ? 2 : 0);
+    tft.invertDisplay(atoi(invertStr) != 0);
     tft.setSwapBytes(true);
     tft.fillScreen(TFT_BLACK);
 
