@@ -118,6 +118,12 @@ webJPEG's) for flow control.
 
 ## Flashing
 
+Screen Rotation (0°/180°) and Invert Colors options are available in the browser
+flasher, same convention and same underlying reason as webJPEG-CYD's - see that
+example's README's "Orientation" and "Troubleshooting" sections for the full
+explanation (`rotationStr`/`invertStr` in `webRAW-CYD.cpp` if flashing via
+PlatformIO instead).
+
 Now listed in the [browser flasher](https://lemio.github.io/EmbeddedScreenSharing/wizard.html)
 as "WebRAW Stream Display (CYD)" - same not-yet-hardware-confirmed caveat as
 webJPEG-CYD's README (the flasher tool itself documents itself as ESP32-S3-only; this

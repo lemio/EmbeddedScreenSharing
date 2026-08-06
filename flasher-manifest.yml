@@ -62,15 +62,11 @@ site:
 examples:
   webRAW:
     name: WebRAW Stream Display
-    recommended: true
     description: >-
-      Streams a browser tab, window, or screen share to the AMOLED display over WiFi as
-      raw RGB565 pixels, deflate-compressed in the browser - no JPEG anywhere in the
-      pipeline, so it's lossless (no compression artifacts) while still keeping up a
-      real-time frame rate (~7.75fps sustained on the 1.91" board with flow control on,
-      close to WebH264's ~8.2fps). Auto-detects the attached panel at boot, so this one
-      firmware works on the 1.47" Lite, 1.91", and 2.41"/T4-S3 T-Display AMOLED boards.
-      Screen share only (no webcam).
+      Streams a browser tab, window, or screen share to the display over WiFi,
+      pixel-perfect with no compression artifacts. Best for flat, low-color content
+      like UI screens or text - fast-moving video updates less often. Works on any
+      AMOLED board (auto-detected).
     sourceUrl: https://github.com/lemio/EmbeddedScreenSharing/tree/main/examples/webRAW
     hardware:
       - name: LilyGo T-Display-AMOLED-Lite
@@ -101,9 +97,8 @@ examples:
   webJPEG:
     name: WebJPEG Stream Display
     description: >-
-      Streams a browser tab, camera, or screen share to the AMOLED display over WiFi as
-      MJPEG frames. Auto-detects the attached panel at boot, so this one firmware works
-      on the 1.47" Lite, 1.91", and 2.41"/T4-S3 T-Display AMOLED boards.
+      Streams a browser tab or screen share to the display over WiFi as a series of
+      JPEG images. Simple and reliable. Works on any AMOLED board (auto-detected).
     sourceUrl: https://github.com/lemio/EmbeddedScreenSharing/tree/main/examples/webJPEG
     hardware:
       - name: LilyGo T-Display-AMOLED-Lite
@@ -128,17 +123,16 @@ examples:
         max_length: 100
     expectedBehavior:
       - Device connects to WiFi and shows its IP address and mDNS hostname on screen
-      - Open the streaming page linked above and share a browser tab, camera, or your whole screen
+      - Open the streaming page linked above and share a browser tab or your whole screen
       - Live serial output below shows connection status and per-frame timing in real time
 
   webH264:
     name: WebH264 Stream Display
+    recommended: true
     description: >-
-      Streams a browser tab or window to the AMOLED display over WiFi as H.264, encoded
-      in-browser with WebCodecs and decoded on-device. Sharper image and much lower
-      bandwidth than WebJPEG at the same quality, at the cost of a slower decoder
-      (roughly 3-5fps). Auto-detects the attached panel at boot, so this one firmware
-      works on the 1.47" Lite, 1.91", and 2.41"/T4-S3 T-Display AMOLED boards.
+      Streams a browser tab or window to the display over WiFi as video, using the
+      same H.264 format as most streaming apps. Sharper image and lower WiFi usage
+      than WebJPEG. Works on any AMOLED board (auto-detected).
     sourceUrl: https://github.com/lemio/EmbeddedScreenSharing/tree/main/examples/webH264
     hardware:
       - name: LilyGo T-Display-AMOLED-Lite
@@ -169,10 +163,8 @@ examples:
   webJPEG-CYD:
     name: WebJPEG Stream Display (CYD)
     description: >-
-      Streams a browser tab, camera, or screen share to the display over WiFi as MJPEG
-      frames - same protocol as WebJPEG, ported to the "Cheap Yellow Display"
-      (ESP32-2432S028R): a much cheaper, widely available board with a 2.8" 240x320
-      LCD, completely outside the LilyGo AMOLED lineup the other firmwares here target.
+      Streams a browser tab or screen share to the display over WiFi as a series of
+      JPEG images. Works on the cheap "Cheap Yellow Display" (CYD) board.
     sourceUrl: https://github.com/lemio/EmbeddedScreenSharing/tree/main/examples/webJPEG-CYD
     hardware:
       - name: CYD (ESP32-2432S028R)
@@ -213,18 +205,18 @@ examples:
         max_length: 16
     expectedBehavior:
       - Device connects to WiFi and shows its IP address and mDNS hostname on screen
-      - Open the streaming page linked above and share a browser tab, camera, or your whole screen
+      - Open the streaming page linked above and share a browser tab or your whole screen
       - Live serial output below shows connection status and per-frame timing in real time
 
   webRAW-CYD:
     recommended: true
     name: WebRAW Stream Display (CYD)
     description: >-
-      Streams a browser tab, window, or screen share to the same CYD board as
-      WebJPEG-CYD, as raw RGB565 pixels deflate-compressed in the browser instead of
-      JPEG - lossless, and roughly 3-6x faster to render than JPEG on this hardware
-      (see that example's README), at the cost of a bigger payload unless the content
-      compresses well. Screen share only (no webcam).
+      Streams a browser tab, window, or screen share to the display over WiFi,
+      pixel-perfect with no compression artifacts. Works on the cheap "Cheap Yellow
+      Display" (CYD) board - the recommended pick there, since it renders 3-6x faster
+      than WebJPEG-CYD by pushing whole strips of pixels at once instead of many
+      small blocks.
     sourceUrl: https://github.com/lemio/EmbeddedScreenSharing/tree/main/examples/webRAW-CYD
     hardware: CYD (ESP32-2432S028R)
     variables:

@@ -163,6 +163,12 @@ root README's Rotation section), so it sidesteps this firmware-level issue compl
 `/boardinfo` reports this board as 240x320 (portrait); pick whichever of 90°/270°
 matches your physical mounting.
 
+**For a board mounted upside down (still portrait), use the browser flasher's Screen
+Rotation option instead** - it's flash-time-patchable (`rotationStr` in
+`webJPEG-CYD.cpp`, same convention as WiFi credentials) and only ever applies 0° or
+180°, since 90°/270° are the confirmed-broken mode described above, not just
+unimplemented.
+
 ## Using it
 
 Same flow as webJPEG - see that example's README's "Using it" section; the only
@@ -197,8 +203,13 @@ difference is this board has no auto-detected `/boardinfo` size mismatch to worr
   `0`, landing back on the same BGR default as not setting the flag at all (which is
   exactly the bug an earlier attempt here hit - see
   [learnings.md](../../learnings.md)). If colors still look wrong with that flag
-  correctly set to `1`, then try `-DTFT_INVERSION_ON=1` instead - a different, rarer
-  panel-batch quirk, not the one real hardware actually hit here.
+  correctly set to `1`, it's likely a different, rarer panel-batch quirk (some CYD
+  variants - notably the two-USB-port "CYD2USB" clone - wire their panel with inverted
+  colors at the hardware level; see
+  [ESP32-Cheap-Yellow-Display's cyd.md](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display/blob/master/cyd.md))
+  - use the browser flasher's **Invert Colors** option rather than a build flag/
+  reflash; it's a flash-time-patchable `tft.invertDisplay()` call (see `invertStr` in
+  `webJPEG-CYD.cpp`), same convention as WiFi credentials.
 - Everything else (stream not starting, mixed-content WebSocket block, etc.) - see the
   root README's "Why the redirect" section and webJPEG's own Troubleshooting section;
   both apply unchanged here.
