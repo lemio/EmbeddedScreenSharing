@@ -237,7 +237,7 @@ panel, not just unimplemented.
 | -------------------------- | ------------------------------------------------ | ------------------------------------------------- | ------------------------------------------------------- | --------------------------------------- |
 | [T-Display-AMOLED-Lite][1] | [PDF](./schematic/T-Display_AMOLED-Lite.pdf)     | [DWG](./dimensions/T-Display-AMOLED-Lite.DWG)     | [STP](./dimensions/T-Display-AMOLED-Lite-PCB-3D.7z)     | -                                       |
 | [T-Display-S3 AMOLED][2]   | [PDF](./schematic/T-Display-S3-AMOLED-Touch.pdf) | [DWG](./dimensions/T-Display-S3-AMOLED-Touch.DWG) | [STP](./dimensions/T-Display-S3-AMOLED-Touch-PCB-3D.7z) | [ZIP](./shell/T-Display-S3-AMOLED.zip)  |
-| [T4-S3][3]                 | [PDF](./schematic/T4-S3-240719.pdf)              | [DWG](./dimensions/T4-S3-AMOLED.DWG)              | [STP](./dimensions/T4-S3-AMOLED-PCB-3D.7z)              | [ZIP](./shell/T4-S3-AMOLED.zip)         |
+| [T4-S3][3]                 | [PDF](./schematic/T4-S3-240719.pdf)              | [DXF](./dimensions/T4-S3-AMOLED.dxf)              | [STP](./dimensions/T4-S3-AMOLED-PCB.7z)                 | [ZIP](./shell/T4-S3-AMOLED.zip)         |
 
 Datasheets: [ESP32S3-R8](https://www.espressif.com.cn/en/support/documents/technical-documents?keys=&field_type_tid%5B%5D=842),
 [SH8501B0 (1.47" driver)](./datasheet/SH8501B0%20DataSheet.pdf),

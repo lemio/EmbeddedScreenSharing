@@ -1,9 +1,9 @@
 name: Build & publish flasher site
 
-# Builds every environment in platformio.ini (a bare `pio run` - currently webJPEG,
-# webH264, webRAW, webJPEG-CYD, webRAW-CYD, though only the four listed under
-# `examples:` in flasher-manifest.yml actually end up in the published manifest/UI)
-# and packages them plus a browser flashing UI into docs/, using the reusable Action
+# Builds every environment in platformio.ini (a bare `pio run` - webJPEG, webH264,
+# webRAW, webJPEG-CYD, webRAW-CYD, all five listed under `examples:` in
+# flasher-manifest.yml) and packages them plus a browser flashing UI into docs/, using
+# the reusable Action
 # from lemio/ESP32-S3-Flasher - see that repo's action/action.yml for what it does.
 # Publishing docs/ itself (GitHub Pages source = docs/ on main) is a one-time manual
 # setting in this repo's Settings > Pages.

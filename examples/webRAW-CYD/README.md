@@ -1,8 +1,8 @@
 # webRAW-CYD
 
 Streams a browser tab or screen share to a "Cheap Yellow Display" (CYD) board over
-WiFi as **raw RGB565 pixels, deflate-compressed in the browser** - no JPEG involved
-anywhere in the pipeline. See [webJPEG-CYD](../webJPEG-CYD) for the board itself
+WiFi as **raw RGB565 pixels, zipped in the browser and unzipped on the device** - no
+JPEG involved anywhere in the pipeline. See [webJPEG-CYD](../webJPEG-CYD) for the board itself
 (pin mapping, no-PSRAM constraints, WiFi/QR setup flow, ack protocol) - this example
 reuses all of that unchanged and only swaps the wire protocol and render path.
 
@@ -21,9 +21,9 @@ block-size constraint, so this example pushes whole horizontal strips - an order
 magnitude fewer calls for the same frame - and skips JPEG's lossy compression
 entirely, so there's no ringing/blocking artifacts (relevant for the "gamma/noise"
 kind of visual complaints JPEG mode has had). The cost: a raw payload is bigger than
-an equivalent JPEG unless the content compresses very well with deflate - which flat
-UI/screen-share content (repeated colors, whitespace, sharp uniform edges) usually
-does, but a busy photograph or video won't.
+an equivalent JPEG unless the content zips down very well - which flat UI/screen-share
+content (repeated colors, whitespace, sharp uniform edges) usually does, but a busy
+photograph or video won't.
 
 ## How it works
 
@@ -124,10 +124,10 @@ example's README's "Orientation" and "Troubleshooting" sections for the full
 explanation (`rotationStr`/`invertStr` in `webRAW-CYD.cpp` if flashing via
 PlatformIO instead).
 
-Now listed in the [browser flasher](https://lemio.github.io/EmbeddedScreenSharing/wizard.html)
-as "WebRAW Stream Display (CYD)" - same not-yet-hardware-confirmed caveat as
-webJPEG-CYD's README (the flasher tool itself documents itself as ESP32-S3-only; this
-board is a plain ESP32 over CH340). Fall back to PlatformIO if it doesn't work:
+Listed in the [browser flasher](https://lemio.github.io/EmbeddedScreenSharing/wizard.html)
+as "WebRAW Stream Display (CYD)" and the recommended pick there - confirmed working
+end-to-end on real hardware over this board's CH340 USB-serial adapter, same as
+webJPEG-CYD. If you'd rather not use the browser flasher, PlatformIO works too:
 
 ```bash
 pio run -e webRAW-CYD --target upload

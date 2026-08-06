@@ -1,6 +1,6 @@
 # webJPEG-CYD
 
-Streams a browser tab, window, or camera to a "Cheap Yellow Display" (CYD) board over
+Streams a browser tab or screen share to a "Cheap Yellow Display" (CYD) board over
 WiFi - same protocol as [webJPEG](../webJPEG): the browser captures video, encodes each
 frame as a JPEG, and sends it over a plain `WebSocket`. The ESP32 decodes each JPEG and
 pushes it to the display.
@@ -110,15 +110,12 @@ assuming a bigger number is safe just because the total looks like it should fit
 
 ## Flashing
 
-Now listed in the [browser flasher](https://lemio.github.io/EmbeddedScreenSharing/wizard.html)
-alongside WebJPEG/WebH264 - pick "WebJPEG Stream Display (CYD)". **Not yet confirmed
-working through it on real hardware**: the flasher tool itself
-([ESP32-S3-Flasher](https://github.com/lemio/ESP32-S3-Flasher)) documents itself as
-built for ESP32-S3 devices, and this board is a plain ESP32 on a CH340 USB-serial
-adapter, not S3 native USB. It should work (nothing in that tool's config appeared to
-actually reject a different connected chip family), but that's inference from reading
-its source, not a confirmed test - if it doesn't connect/flash for you through the
-browser, fall back to PlatformIO:
+Listed in the [browser flasher](https://lemio.github.io/EmbeddedScreenSharing/wizard.html)
+alongside the other examples - pick "WebJPEG Stream Display (CYD)". **Confirmed
+working end-to-end through it on real hardware**, including over this board's CH340
+USB-serial adapter (not S3 native USB, which the flasher tool was originally built
+around) - chip detection, flashing, and reset-into-bootloader all work. If you'd
+rather not use the browser flasher, PlatformIO works too:
 
 ```bash
 pio run -e webJPEG-CYD --target upload

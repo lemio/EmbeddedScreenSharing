@@ -1,8 +1,8 @@
 # webRAW
 
 Streams a browser tab, window, or screen share to a LilyGo T-Display AMOLED board over
-WiFi as **raw RGB565 pixels, deflate-compressed in the browser** - no JPEG involved
-anywhere in the pipeline. See [webJPEG](../webJPEG) for the board setup this reuses
+WiFi as **raw RGB565 pixels, zipped in the browser and unzipped on the device** - no
+JPEG involved anywhere in the pipeline. See [webJPEG](../webJPEG) for the board setup this reuses
 unchanged (WiFi/QR setup flow, panel auto-detection via `amoled.begin()`, PSRAM buffer
 strategy) - this example only swaps the wire protocol and render path. See
 [webRAW-CYD](../webRAW-CYD) for the original version of this approach, first proven on
@@ -20,8 +20,8 @@ per-call overhead (hundreds of small `pushImage()`/bus calls), not pixel count o
 decode complexity. Raw RGB565 has no such per-block cost, and this board's PSRAM
 means the whole frame can be decompressed and pushed in one shot rather than split
 into pieces - see "How it works". The tradeoff is the same as webRAW-CYD's: a raw
-payload is bigger than an equivalent JPEG unless the content compresses well with
-deflate, which flat UI/screen-share content usually does.
+payload is bigger than an equivalent JPEG unless the content zips down well, which
+flat UI/screen-share content usually does.
 
 ## How it works
 

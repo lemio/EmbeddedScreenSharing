@@ -1,9 +1,9 @@
 # webJPEG
 
-Streams a browser tab, window, or camera to a LilyGo T-Display AMOLED board over WiFi.
-The browser captures video with `getDisplayMedia`/`getUserMedia`, draws each frame to a
-`<canvas>`, encodes it as a JPEG, and sends it over a plain `WebSocket`. The ESP32
-decodes each JPEG and pushes it straight to the display.
+Streams a browser tab or screen share to a LilyGo T-Display AMOLED board over WiFi.
+The browser captures video with `getDisplayMedia`, draws each frame to a `<canvas>`,
+encodes it as a JPEG, and sends it over a plain `WebSocket`. The ESP32 decodes each
+JPEG and pushes it straight to the display.
 
 This is the sibling of [webH264](../webH264) - see the root [README](../../README.md)
 for how the two compare and which one to pick. Both share the same streaming page

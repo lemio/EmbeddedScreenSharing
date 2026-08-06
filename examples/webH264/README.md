@@ -1,8 +1,8 @@
 # webH264
 
-Streams a browser tab, window, or camera to a LilyGo T-Display AMOLED board over WiFi.
-The browser captures video with `getDisplayMedia`/`getUserMedia`, encodes it as H.264
-using the [WebCodecs API](https://developer.mozilla.org/en-US/docs/Web/API/WebCodecs_API)
+Streams a browser tab or window to a LilyGo T-Display AMOLED board over WiFi. The
+browser captures video with `getDisplayMedia`, encodes it as H.264 using the
+[WebCodecs API](https://developer.mozilla.org/en-US/docs/Web/API/WebCodecs_API)
 (`VideoEncoder`), and sends the Annex-B stream over a plain `WebSocket` - the ESP32
 decodes it with Espressif's [esp_h264](https://github.com/espressif/esp-h264-component)
 (tinyh264) software decoder and pushes the result straight to the display.

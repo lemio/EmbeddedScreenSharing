@@ -44,16 +44,15 @@
 # leaving it as the generic "ESP32-S3 Web Flasher"/"ESP32-S3 Flash Wizard" - see
 # ESP32-S3-Flasher's README.md, "Site-wide branding" section, for the full field list.
 #
-# CAVEAT for the webJPEG-CYD/webRAW-CYD entries below: the CYD is a plain ESP32 (not
-# S3), connected over a CH340 USB-serial adapter, not native USB. ESP32-S3-Flasher's
-# own README describes itself as built for ESP32-S3 specifically (its shared config.js
-# sets a single, non-per-firmware CHIP_NAME: "ESP32-S3") - reading that tool's source,
-# CHIP_NAME didn't appear to be used to reject a connected device's actual chip family
-# (esptool-js itself detects the real chip from the ROM handshake), so this *should*
-# still work, but that's inference from source, not a confirmed test against real CYD
-# hardware through the actual published web flasher. Verify on hardware after this
-# publishes; if CH340/plain-ESP32 turns out to be genuinely unsupported, that's a fix
-# needed in the ESP32-S3-Flasher repo itself, not here.
+# NOTE on the webJPEG-CYD/webRAW-CYD entries below: the CYD is a plain ESP32 (not S3),
+# connected over a CH340 USB-serial adapter, not native USB - confirmed working
+# end-to-end through this same browser flasher on real CYD hardware (chip detection,
+# flashing, and the classic-reset-into-bootloader pulse all work over CH340; see
+# ESP32-S3-Flasher's own learnings.md for the reset-sequence and bootloader-offset
+# fixes that got it there). The one CYD-specific config that does need to be right is
+# the bootloader flash offset (0x1000 for a plain ESP32 vs 0x0 for ESP32-S3) - handled
+# automatically per-environment by build_and_package.py's board-MCU lookup, not
+# something to hardcode here.
 
 site:
   title: Embedded Screen Sharing Flasher

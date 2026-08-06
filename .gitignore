@@ -17,6 +17,10 @@ managed_components/
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode
+
+# Local Claude Code working notes/settings - internal dev-notes tone, not meant for
+# the public repo (same treatment as .vscode above).
+.claude
 *.pyc
 build
 script
