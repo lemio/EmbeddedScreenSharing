@@ -133,14 +133,14 @@
 <body>
     <div class="container">
         <h1>ESP32 Display Video Stream</h1>
-        <p>Stream a browser tab, window, or camera to your ESP32 display board over WiFi
+        <p>Stream a browser tab or your screen to your ESP32 display board over WiFi
             <span id="variantBadge" class="variant-badge variant-unknown">detecting...</span></p>
 
         <div class="config">
             <h3>Configuration</h3>
             <div>
                 <label>ESP32 Address:</label>
-                <input type="text" id="espAddress" placeholder="http://esp-webjpeg.local">
+                <input type="text" id="espAddress" placeholder="http://esp-screen.local">
             </div>
             <div>
                 <label>Mode:</label>
@@ -270,10 +270,10 @@
                         <option value="wait">Wait for device ack - flow-controlled</option>
                     </select>
                 </div>
-                <div class="hint">Screen share only (no webcam). Raw RGB565 pixels, deflate-compressed in
-                    the browser - lossless, no JPEG artifacts, but a bigger payload than JPEG unless the
-                    content compresses well (flat UI/screen content usually does). Experimental - works on
-                    both the CYD (examples/webRAW-CYD) and the AMOLED lineup (examples/webRAW); see
+                <div class="hint">Screen share only (no webcam). Raw RGB565 pixels, zipped in the browser
+                    and unzipped on the device - lossless, no JPEG artifacts, but a bigger payload than
+                    JPEG unless the content zips down well (flat UI/screen content usually does). Works on
+                    both the CYD (examples/webRAW-CYD) and the AMOLED lineup (examples/webRAW) - see
                     whichever README matches your board.</div>
             </div>
         </div>
@@ -303,9 +303,10 @@
             <p>Tips:</p>
             <ul style="text-align: left; display: inline-block;">
                 <li>Make sure your ESP32 is connected to WiFi</li>
-                <li>Reachable at <code>esp-webjpeg.local</code> / <code>esp-webh264.local</code> unless you set a different mDNS hostname when flashing</li>
+                <li>Reachable at <code>esp-screen.local</code> unless you set a different mDNS hostname when flashing</li>
                 <li>Screen share works in Chrome, Edge, and Firefox (WebH264 needs Chrome or Edge for WebCodecs)</li>
-                <li>Grant camera/screen permissions when prompted</li>
+                <li>Grant screen-share permission when prompted</li>
+                <li class="mode-jpeg-only">WebJPEG can also use your webcam instead of screen share - see the Source dropdown above</li>
                 <li class="mode-jpeg-only">Display size auto-detects from the board - override the dropdown manually if it's wrong or unreachable</li>
                 <li class="mode-jpeg-only">Lower frame rate or quality if stream is laggy</li>
                 <li class="mode-h264-only">The on-device decoder tops out around 3-5fps - open the browser console (F12) for detailed per-frame logs</li>
