@@ -115,6 +115,18 @@ LilyGo_Class amoled;
 #define WIDTH  amoled.width()
 #define HEIGHT amoled.height()
 
+// True on the 2.41" T4-S3 board (LILYGO_AMOLED_241) specifically, set once in
+// setup() right after amoled.setRotation(1) there - see that call's comment for
+// the full story (rotation 1 avoids a diagonal-tearing MADCTL bit on full-frame
+// video pushes, at the cost of a swapped/portrait native buffer). WIDTH/HEIGHT
+// above already reflect that swap for the *video* path (intentional - the browser
+// compensates, see webRAW.cpp's setup()). STATUS_WIDTH/STATUS_HEIGHT below swap
+// them back just for firmware-drawn status/boot screens, which have no browser to
+// compensate for them - see pushColorsCompensated()'s comment in LilyGo_AMOLED.h.
+bool statusScreenNeedsRotationFix = false;
+#define STATUS_WIDTH  (statusScreenNeedsRotationFix ? HEIGHT : WIDTH)
+#define STATUS_HEIGHT (statusScreenNeedsRotationFix ? WIDTH : HEIGHT)
+
 // Nudges the connected viewer if nothing's been heard from it in a while - see
 // ACK_NUDGE_INTERVAL_MS below. Ported from webRAW-CYD.cpp, where real-hardware
 // testing found that a lost/delayed ack in "Wait for device ack" mode can otherwise
@@ -136,6 +148,20 @@ LilyGo_Class amoled;
 // client(s) are actually still connected.
 volatile uint32_t lastDataActivityMs = 0;
 static const uint32_t ACK_NUDGE_INTERVAL_MS = 2000;
+
+// True from the first byte of a WS message until its ack has actually been sent
+// (either the post-render ack in loop(), or the immediate ack on the mutex-busy
+// drop path in WS_EVT_DATA) - see the nudge check in loop() below for why this
+// exists. A real-hardware 10-run test found the nudge firing mid-stream (its
+// >2000ms-since-last-activity condition tripping despite frames still actively
+// flowing - root cause not fully pinned down, but reproducible) and sending its
+// own unconditional ws.textAll("a"), which let the client jump ahead of whatever
+// frame was still mid-flight - reintroducing the exact "ack decoupled from
+// render" cascade the ack-after-render fix above was meant to eliminate, just
+// conditionally instead of continuously. Gating the nudge on this flag means it
+// can only ever fire when nothing is genuinely in flight - the actual condition
+// its "last ack got lost" recovery purpose calls for.
+volatile bool frameInFlight = false;
 
 volatile uint8_t* frameBuffer = nullptr;
 volatile size_t frameSize = 0;
@@ -280,28 +306,28 @@ void setupWiFi() {
 
         // See webJPEG.cpp's identical line for why this is here.
         spr.setTextColor(TFT_DARKGREY, TFT_BLACK);
-        spr.drawString(String(FW_VARIANT) + "  " + buildDateString(), WIDTH / 2, 4, 1);
+        spr.drawString(String(FW_VARIANT) + "  " + buildDateString(), STATUS_WIDTH / 2, 4, 1);
 
         spr.setTextColor(TFT_WHITE, TFT_BLACK);
-        spr.drawString("Connecting to WiFi", WIDTH / 2, HEIGHT * 0.10, 2);
+        spr.drawString("Connecting to WiFi", STATUS_WIDTH / 2, STATUS_HEIGHT * 0.10, 2);
 
         spr.setTextColor(TFT_CYAN, TFT_BLACK);
-        spr.drawString(ssid, WIDTH / 2, HEIGHT * 0.10 + 22, 2);
+        spr.drawString(ssid, STATUS_WIDTH / 2, STATUS_HEIGHT * 0.10 + 22, 2);
 
         char spinner[2] = { spinnerFrames[attempts % 4], '\0' };
         spr.setTextColor(TFT_WHITE, TFT_BLACK);
-        spr.drawString(spinner, WIDTH / 2, HEIGHT * 0.52, 4);
+        spr.drawString(spinner, STATUS_WIDTH / 2, STATUS_HEIGHT * 0.52, 4);
 
-        int barWidth = WIDTH * 0.6;
+        int barWidth = STATUS_WIDTH * 0.6;
         int barHeight = 8;
-        int barX = (WIDTH - barWidth) / 2;
-        int barY = HEIGHT - 28;
+        int barX = (STATUS_WIDTH - barWidth) / 2;
+        int barY = STATUS_HEIGHT - 28;
         spr.drawRect(barX, barY, barWidth, barHeight, TFT_DARKGREY);
         int fillWidth = (barWidth - 2) * attempts / maxAttempts;
         spr.fillRect(barX + 1, barY + 1, fillWidth, barHeight - 2, TFT_CYAN);
 
         spr.setTextDatum(TL_DATUM);
-        amoled.pushColors(0, 0, WIDTH, HEIGHT, (uint16_t *)spr.getPointer());
+        amoled.pushColorsCompensated(STATUS_WIDTH, STATUS_HEIGHT, (uint16_t *)spr.getPointer());
 
         delay(500);
         Serial.print(".");
@@ -324,38 +350,38 @@ void setupWiFi() {
         spr.fillSprite(TFT_BLACK);
         spr.setTextDatum(TC_DATUM);
         spr.setTextColor(TFT_DARKGREY, TFT_BLACK);
-        spr.drawString(String(FW_VARIANT) + "  " + buildDateString(), WIDTH / 2, 4, 1);
+        spr.drawString(String(FW_VARIANT) + "  " + buildDateString(), STATUS_WIDTH / 2, 4, 1);
         spr.setTextColor(TFT_GREEN, TFT_BLACK);
-        spr.drawString("WiFi Connected", WIDTH / 2, HEIGHT * 0.08, 2);
+        spr.drawString("WiFi Connected", STATUS_WIDTH / 2, STATUS_HEIGHT * 0.08, 2);
         spr.setTextColor(TFT_WHITE, TFT_BLACK);
-        spr.drawString(ssid, WIDTH / 2, HEIGHT * 0.08 + 22, 2);
-        spr.drawString(WiFi.localIP().toString(), WIDTH / 2, HEIGHT * 0.08 + 44, 2);
-        spr.drawString("http://" + String(mdnsName) + ".local", WIDTH / 2, HEIGHT * 0.08 + 66, 2);
+        spr.drawString(ssid, STATUS_WIDTH / 2, STATUS_HEIGHT * 0.08 + 22, 2);
+        spr.drawString(WiFi.localIP().toString(), STATUS_WIDTH / 2, STATUS_HEIGHT * 0.08 + 44, 2);
+        spr.drawString("http://" + String(mdnsName) + ".local", STATUS_WIDTH / 2, STATUS_HEIGHT * 0.08 + 66, 2);
         spr.setTextColor(TFT_YELLOW, TFT_BLACK);
-        spr.drawString("Waiting for stream...", WIDTH / 2, HEIGHT * 0.08 + 92, 2);
+        spr.drawString("Waiting for stream...", STATUS_WIDTH / 2, STATUS_HEIGHT * 0.08 + 92, 2);
         spr.setTextDatum(TL_DATUM);
-        amoled.pushColors(0, 0, WIDTH, HEIGHT, (uint16_t *)spr.getPointer());
+        amoled.pushColorsCompensated(STATUS_WIDTH, STATUS_HEIGHT, (uint16_t *)spr.getPointer());
     } else {
         Serial.println("\nWiFi connection failed!");
         spr.fillSprite(TFT_BLACK);
         spr.setTextDatum(TC_DATUM);
 
         spr.setTextColor(TFT_RED, TFT_BLACK);
-        spr.drawString("Can't connect to WiFi network", WIDTH / 2, HEIGHT * 0.05, 1);
+        spr.drawString("Can't connect to WiFi network", STATUS_WIDTH / 2, STATUS_HEIGHT * 0.05, 1);
         spr.setTextColor(TFT_WHITE, TFT_BLACK);
-        spr.drawString(ssid, WIDTH / 2, HEIGHT * 0.05 + 14, 2);
+        spr.drawString(ssid, STATUS_WIDTH / 2, STATUS_HEIGHT * 0.05 + 14, 2);
 
-        int textBottom = HEIGHT * 0.05 + 14 + 18;
+        int textBottom = STATUS_HEIGHT * 0.05 + 14 + 18;
         int captionHeight = 16;
-        int qrMaxSize = min((int)WIDTH, (int)HEIGHT - textBottom - captionHeight) * 0.9;
-        int qrCenterY = textBottom + (HEIGHT - captionHeight - textBottom) / 2;
-        drawQRCode(githubRepoUrl, WIDTH / 2, qrCenterY, qrMaxSize, TFT_WHITE, TFT_BLACK);
+        int qrMaxSize = min((int)STATUS_WIDTH, (int)STATUS_HEIGHT - textBottom - captionHeight) * 0.9;
+        int qrCenterY = textBottom + (STATUS_HEIGHT - captionHeight - textBottom) / 2;
+        drawQRCode(githubRepoUrl, STATUS_WIDTH / 2, qrCenterY, qrMaxSize, TFT_WHITE, TFT_BLACK);
 
         spr.setTextColor(TFT_DARKGREY, TFT_BLACK);
-        spr.drawString("Scan for setup help", WIDTH / 2, HEIGHT - 16, 2);
+        spr.drawString("Scan for setup help", STATUS_WIDTH / 2, STATUS_HEIGHT - 16, 2);
 
         spr.setTextDatum(TL_DATUM);
-        amoled.pushColors(0, 0, WIDTH, HEIGHT, (uint16_t *)spr.getPointer());
+        amoled.pushColorsCompensated(STATUS_WIDTH, STATUS_HEIGHT, (uint16_t *)spr.getPointer());
     }
 }
 
@@ -394,6 +420,12 @@ void setupWebServer() {
             LOGF("WebSocket client #%u disconnected\n", client->id());
             wsAssemblySize = 0;
             wsExpectedSize = 0;
+            // Safety reset: a message mid-reassembly when the client disconnects
+            // (info->index==0 already set frameInFlight true) would otherwise leave
+            // it stuck true forever across the next connection, permanently
+            // disabling the nudge below for a future session that might genuinely
+            // need it.
+            frameInFlight = false;
         } else if (type == WS_EVT_DATA) {
             AwsFrameInfo *info = (AwsFrameInfo*)arg;
 
@@ -410,6 +442,7 @@ void setupWebServer() {
                 wsExpectedSize = info->len;
                 wsAssemblySize = 0;
                 wsRecvStartMs = millis();
+                frameInFlight = true;
             }
 
             if (info->index + len > wsExpectedSize || info->index + len > MAX_FRAME_SIZE) {
@@ -432,13 +465,28 @@ void setupWebServer() {
                 frameRecvTimestamp = wsRecvStartMs;
 
                 xSemaphoreGive(frameMutex);
+                // No ack here anymore - see loop()'s ws.textAll("a") after
+                // drawRawFrame() for why. Acking immediately on receipt (before
+                // decompress/swap/push even started) made "wait mode"'s
+                // round-trip purely network-timed, not render-timed: a real-
+                // hardware test found a client that waits for ack before
+                // sending the next frame could still outrun the ~100-120ms
+                // render pipeline whenever send+ack RTT was faster than that
+                // (it usually is), hitting this same mutex non-blocking below
+                // and getting silently dropped - 63-89% drop rates observed
+                // depending on payload size, despite "waiting for ack" the
+                // whole time. Delaying the ack until render is actually done
+                // makes wait mode a true one-frame-in-flight protocol.
             } else {
                 LOGF("Mutex busy - frame dropped (Recv=%lums)\n", (uint32_t)(millis() - wsRecvStartMs));
+                // Still ack a dropped frame - only reachable now by a client
+                // not doing strict one-at-a-time waiting (e.g. Ack Mode
+                // "immediate", which ignores acks anyway), so this just avoids
+                // leaving such a client stalled on an ack that would otherwise
+                // never come for this specific dropped frame.
+                client->text("a");
+                frameInFlight = false;
             }
-
-            // Tiny flow-control ack, unconditional - see webJPEG.cpp's identical
-            // comment. Acted on only when stream.html's Ack Mode is "wait".
-            client->text("a");
         }
     });
 
@@ -466,7 +514,39 @@ void setup()
         }
     }
 
-    spr.createSprite(WIDTH, HEIGHT);
+    // Experimental: sync each pushColors() to the panel's Tearing-Effect signal - see
+    // LilyGo_AMOLED::setTearingEffectSync()'s comment. Testing whether this clears up
+    // the banding seen during real-hardware gradient streaming (new frame data racing
+    // the panel's own internal refresh). Opt-in and local to this example - every
+    // other example's amoled.pushColors() behavior is unchanged.
+    amoled.setTearingEffectSync(true);
+
+    // Rotation 1 sets MADCTL to RM690B0_MADCTL_RGB only - no MV (row/column exchange)
+    // bit, unlike rotation 0's default MX|MV. Real-hardware testing confirmed MV was
+    // the dominant cause of diagonal tearing/banding on full-frame video pushes at
+    // rotation 0 (see LilyGo_AMOLED.cpp's setRotation() MADCTL cases) - switching to
+    // rotation 1 made it negligible. Only the LILYGO_AMOLED_241 (2.41" T4-S3) board
+    // has this specific MV-at-rotation-0 issue confirmed on real hardware, so this is
+    // scoped to that board only - the other auto-detected panels (1.47"/1.91") stay
+    // at their normal rotation 0, unchanged, since there's no evidence they need this.
+    //
+    // Tradeoff: rotation 1's native buffer is swapped (450x600 portrait) relative to
+    // rotation 0's (600x450 landscape) - by design, not fixed up in firmware, since
+    // the video pipeline is meant to stay this way: the browser (stream.html) is
+    // responsible for rotating captured content to match via its existing rotation
+    // control, reading these swapped dimensions straight from /boardinfo like normal.
+    // WIDTH/HEIGHT below (and everywhere else in this file computed from them, e.g.
+    // rawPixelBufferPixels, /boardinfo's own width/height) intentionally reflect the
+    // swap. STATUS_WIDTH/STATUS_HEIGHT (see their definition above) swap back just
+    // for firmware-drawn status/boot screens, which have no browser to do this for
+    // them - see pushColorsCompensated() in LilyGo_AMOLED.h for how those stay
+    // correctly landscape-oriented despite the panel itself running rotation 1.
+    if (amoled.getBoardID() == LILYGO_AMOLED_241) {
+        amoled.setRotation(1);
+        statusScreenNeedsRotationFix = true;
+    }
+
+    spr.createSprite(STATUS_WIDTH, STATUS_HEIGHT);
     spr.setSwapBytes(true);
 
     frameMutex = xSemaphoreCreateMutex();
@@ -491,12 +571,12 @@ void setup()
     spr.fillSprite(TFT_BLACK);
     spr.setTextColor(TFT_WHITE, TFT_BLACK);
     spr.setTextDatum(TC_DATUM);
-    spr.drawString("webRAW", WIDTH/2, HEIGHT/2 - 20, 2);
-    spr.drawString("Starting...", WIDTH/2, HEIGHT/2 + 10, 2);
+    spr.drawString("webRAW", STATUS_WIDTH/2, STATUS_HEIGHT/2 - 20, 2);
+    spr.drawString("Starting...", STATUS_WIDTH/2, STATUS_HEIGHT/2 + 10, 2);
     spr.setTextColor(TFT_DARKGREY, TFT_BLACK);
-    spr.drawString(buildDateString(), WIDTH/2, HEIGHT/2 + 30, 1);
+    spr.drawString(buildDateString(), STATUS_WIDTH/2, STATUS_HEIGHT/2 + 30, 1);
     spr.setTextDatum(TL_DATUM);
-    amoled.pushColors(0, 0, WIDTH, HEIGHT, (uint16_t *)spr.getPointer());
+    amoled.pushColorsCompensated(STATUS_WIDTH, STATUS_HEIGHT, (uint16_t *)spr.getPointer());
     delay(1000);
 
     setupWiFi();
@@ -530,6 +610,14 @@ void loop()
 
             newFrameAvailable = false;
             xSemaphoreGive(frameMutex);
+
+            // Ack now that the frame has actually been rendered - see
+            // WS_EVT_DATA's comment above for why this moved here from the
+            // WS event handler. ws.textAll() rather than a cached client
+            // pointer, for the same cross-task-safety reason as the
+            // ACK_NUDGE mechanism below (see its comment).
+            ws.textAll("a");
+            frameInFlight = false;
         }
     }
 
@@ -543,8 +631,11 @@ void loop()
 
     // See webRAW-CYD.cpp's identical mechanism/comment - resends the ack on our own
     // initiative if nothing's arrived in a while, in case the original ack was the
-    // thing that got lost/delayed.
-    if (ws.count() > 0 && (now - lastDataActivityMs > ACK_NUDGE_INTERVAL_MS)) {
+    // thing that got lost/delayed. Gated on !frameInFlight - see that flag's
+    // comment for why: this must only ever fire when nothing is genuinely still
+    // being reassembled or awaiting its render-ack, or it reintroduces a premature,
+    // render-independent ack exactly like the bug the ack-after-render fix removed.
+    if (ws.count() > 0 && !frameInFlight && (now - lastDataActivityMs > ACK_NUDGE_INTERVAL_MS)) {
         ws.textAll("a");
         lastDataActivityMs = now;
         LOGLN("RAW: no data received in a while - resending ack in case the last one was lost/delayed");

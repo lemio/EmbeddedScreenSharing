@@ -71,11 +71,26 @@ AsyncWebSocket ws("/ws");          // color images
 AsyncWebSocket wsMono("/ws-mono"); // monochrome images
 
 TFT_eSPI tft = TFT_eSPI();
-TFT_eSprite spr = TFT_eSprite(&tft);
+TFT_eSprite spr = TFT_eSprite(&tft); // decoded JPEG video frames only - see WIDTH/HEIGHT
+// Boot/WiFi/QR status screens only - kept separate from spr because, unlike webRAW.cpp,
+// spr here also holds actual decoded video content (see drawJPEG()) which must stay
+// sized at the panel's actual current WIDTH/HEIGHT (possibly swapped, see
+// statusScreenNeedsRotationFix below) - a status sprite drawn "as landscape" needs its
+// own, differently-shaped buffer. See STATUS_WIDTH/STATUS_HEIGHT and
+// pushColorsCompensated() in LilyGo_AMOLED.h.
+TFT_eSprite statusSpr = TFT_eSprite(&tft);
 LilyGo_Class amoled;
 
 #define WIDTH  amoled.width()
 #define HEIGHT amoled.height()
+
+// True on the 2.41" T4-S3 board (LILYGO_AMOLED_241) specifically - see webRAW.cpp's
+// identical flag/comment for the full story (rotation 1 avoids a diagonal-tearing
+// MADCTL bit on full-frame video pushes, at the cost of a swapped/portrait native
+// buffer that the browser is responsible for compensating). Set once in setup().
+bool statusScreenNeedsRotationFix = false;
+#define STATUS_WIDTH  (statusScreenNeedsRotationFix ? HEIGHT : WIDTH)
+#define STATUS_HEIGHT (statusScreenNeedsRotationFix ? WIDTH : HEIGHT)
 
 volatile uint8_t* frameBuffer = nullptr;
 volatile size_t frameSize = 0;
@@ -345,14 +360,16 @@ void drawQRCode(const char *text, int16_t centerX, int16_t centerY, int16_t maxS
     int startX = centerX - totalSize / 2;
     int startY = centerY - totalSize / 2;
 
-    spr.fillRect(startX, startY, totalSize, totalSize, bgColor);
+    // Only ever called from the status/WiFi-failure screen below, so this draws into
+    // statusSpr, not the video-frame spr - see statusSpr's declaration comment.
+    statusSpr.fillRect(startX, startY, totalSize, totalSize, bgColor);
 
     for (int y = 0; y < size; y++) {
         for (int x = 0; x < size; x++) {
             if (qrcodegen_getModule(qrOut, x, y)) {
-                spr.fillRect(startX + (quietZoneModules + x) * scale,
-                             startY + (quietZoneModules + y) * scale,
-                             scale, scale, fgColor);
+                statusSpr.fillRect(startX + (quietZoneModules + x) * scale,
+                                    startY + (quietZoneModules + y) * scale,
+                                    scale, scale, fgColor);
             }
         }
     }
@@ -368,38 +385,38 @@ void setupWiFi() {
     int attempts = 0;
 
     while (WiFi.status() != WL_CONNECTED && attempts < maxAttempts) {
-        spr.fillSprite(TFT_BLACK);
-        spr.setTextDatum(TC_DATUM);
+        statusSpr.fillSprite(TFT_BLACK);
+        statusSpr.setTextDatum(TC_DATUM);
 
         // What firmware is this, and how stale? Shown on every status screen (not
         // just once at boot) so it's visible the whole time someone might be looking
         // at the physical display, including while troubleshooting a WiFi connect
         // failure - exactly when "is this even the firmware I think it is" matters.
-        spr.setTextColor(TFT_DARKGREY, TFT_BLACK);
-        spr.drawString(String(FW_VARIANT) + "  " + buildDateString(), WIDTH / 2, 4, 1);
+        statusSpr.setTextColor(TFT_DARKGREY, TFT_BLACK);
+        statusSpr.drawString(String(FW_VARIANT) + "  " + buildDateString(), STATUS_WIDTH / 2, 4, 1);
 
-        spr.setTextColor(TFT_WHITE, TFT_BLACK);
-        spr.drawString("Connecting to WiFi", WIDTH / 2, HEIGHT * 0.10, 2);
+        statusSpr.setTextColor(TFT_WHITE, TFT_BLACK);
+        statusSpr.drawString("Connecting to WiFi", STATUS_WIDTH / 2, STATUS_HEIGHT * 0.10, 2);
 
-        spr.setTextColor(TFT_CYAN, TFT_BLACK);
-        spr.drawString(ssid, WIDTH / 2, HEIGHT * 0.10 + 22, 2);
+        statusSpr.setTextColor(TFT_CYAN, TFT_BLACK);
+        statusSpr.drawString(ssid, STATUS_WIDTH / 2, STATUS_HEIGHT * 0.10 + 22, 2);
 
         // Spinner: rotates once per attempt to show the connection is progressing
         char spinner[2] = { spinnerFrames[attempts % 4], '\0' };
-        spr.setTextColor(TFT_WHITE, TFT_BLACK);
-        spr.drawString(spinner, WIDTH / 2, HEIGHT * 0.52, 4);
+        statusSpr.setTextColor(TFT_WHITE, TFT_BLACK);
+        statusSpr.drawString(spinner, STATUS_WIDTH / 2, STATUS_HEIGHT * 0.52, 4);
 
         // Progress bar: fills based on attempts remaining before timeout
-        int barWidth = WIDTH * 0.6;
+        int barWidth = STATUS_WIDTH * 0.6;
         int barHeight = 8;
-        int barX = (WIDTH - barWidth) / 2;
-        int barY = HEIGHT - 28;
-        spr.drawRect(barX, barY, barWidth, barHeight, TFT_DARKGREY);
+        int barX = (STATUS_WIDTH - barWidth) / 2;
+        int barY = STATUS_HEIGHT - 28;
+        statusSpr.drawRect(barX, barY, barWidth, barHeight, TFT_DARKGREY);
         int fillWidth = (barWidth - 2) * attempts / maxAttempts;
-        spr.fillRect(barX + 1, barY + 1, fillWidth, barHeight - 2, TFT_CYAN);
+        statusSpr.fillRect(barX + 1, barY + 1, fillWidth, barHeight - 2, TFT_CYAN);
 
-        spr.setTextDatum(TL_DATUM);
-        amoled.pushColors(0, 0, WIDTH, HEIGHT, (uint16_t *)spr.getPointer());
+        statusSpr.setTextDatum(TL_DATUM);
+        amoled.pushColorsCompensated(STATUS_WIDTH, STATUS_HEIGHT, (uint16_t *)statusSpr.getPointer());
 
         delay(500);
         Serial.print(".");
@@ -419,47 +436,47 @@ void setupWiFi() {
             Serial.println("Error setting up mDNS");
         }
 
-        spr.fillSprite(TFT_BLACK);
-        spr.setTextDatum(TC_DATUM);
-        spr.setTextColor(TFT_DARKGREY, TFT_BLACK);
-        spr.drawString(String(FW_VARIANT) + "  " + buildDateString(), WIDTH / 2, 4, 1);
-        spr.setTextColor(TFT_GREEN, TFT_BLACK);
-        spr.drawString("WiFi Connected", WIDTH / 2, HEIGHT * 0.08, 2);
-        spr.setTextColor(TFT_WHITE, TFT_BLACK);
-        spr.drawString(ssid, WIDTH / 2, HEIGHT * 0.08 + 22, 2);
-        spr.drawString(WiFi.localIP().toString(), WIDTH / 2, HEIGHT * 0.08 + 44, 2);
-        spr.drawString("http://" + String(mdnsName) + ".local", WIDTH / 2, HEIGHT * 0.08 + 66, 2);
-        spr.setTextColor(TFT_YELLOW, TFT_BLACK);
-        spr.drawString("Waiting for stream...", WIDTH / 2, HEIGHT * 0.08 + 92, 2);
-        spr.setTextDatum(TL_DATUM);
-        amoled.pushColors(0, 0, WIDTH, HEIGHT, (uint16_t *)spr.getPointer());
+        statusSpr.fillSprite(TFT_BLACK);
+        statusSpr.setTextDatum(TC_DATUM);
+        statusSpr.setTextColor(TFT_DARKGREY, TFT_BLACK);
+        statusSpr.drawString(String(FW_VARIANT) + "  " + buildDateString(), STATUS_WIDTH / 2, 4, 1);
+        statusSpr.setTextColor(TFT_GREEN, TFT_BLACK);
+        statusSpr.drawString("WiFi Connected", STATUS_WIDTH / 2, STATUS_HEIGHT * 0.08, 2);
+        statusSpr.setTextColor(TFT_WHITE, TFT_BLACK);
+        statusSpr.drawString(ssid, STATUS_WIDTH / 2, STATUS_HEIGHT * 0.08 + 22, 2);
+        statusSpr.drawString(WiFi.localIP().toString(), STATUS_WIDTH / 2, STATUS_HEIGHT * 0.08 + 44, 2);
+        statusSpr.drawString("http://" + String(mdnsName) + ".local", STATUS_WIDTH / 2, STATUS_HEIGHT * 0.08 + 66, 2);
+        statusSpr.setTextColor(TFT_YELLOW, TFT_BLACK);
+        statusSpr.drawString("Waiting for stream...", STATUS_WIDTH / 2, STATUS_HEIGHT * 0.08 + 92, 2);
+        statusSpr.setTextDatum(TL_DATUM);
+        amoled.pushColorsCompensated(STATUS_WIDTH, STATUS_HEIGHT, (uint16_t *)statusSpr.getPointer());
     } else {
         Serial.println("\nWiFi connection failed!");
-        spr.fillSprite(TFT_BLACK);
-        spr.setTextDatum(TC_DATUM);
+        statusSpr.fillSprite(TFT_BLACK);
+        statusSpr.setTextDatum(TC_DATUM);
 
         // No variant/build-date line on this screen, unlike the connecting/connected
         // screens above - this one is already tuned tight for the smallest panel
         // (font 1 "to keep this long line from overflowing narrower displays", per the
         // comment below); adding another top line here risks colliding with it on the
         // 1.47" Lite (194px tall) without real hardware to verify the spacing.
-        spr.setTextColor(TFT_RED, TFT_BLACK);
-        spr.drawString("Can't connect to WiFi network", WIDTH / 2, HEIGHT * 0.05, 1);
-        spr.setTextColor(TFT_WHITE, TFT_BLACK);
-        spr.drawString(ssid, WIDTH / 2, HEIGHT * 0.05 + 14, 2);
+        statusSpr.setTextColor(TFT_RED, TFT_BLACK);
+        statusSpr.drawString("Can't connect to WiFi network", STATUS_WIDTH / 2, STATUS_HEIGHT * 0.05, 1);
+        statusSpr.setTextColor(TFT_WHITE, TFT_BLACK);
+        statusSpr.drawString(ssid, STATUS_WIDTH / 2, STATUS_HEIGHT * 0.05 + 14, 2);
 
         // QR code links to the project repo so the user can look up setup help
-        int textBottom = HEIGHT * 0.05 + 14 + 18;
+        int textBottom = STATUS_HEIGHT * 0.05 + 14 + 18;
         int captionHeight = 16;
-        int qrMaxSize = min((int)WIDTH, (int)HEIGHT - textBottom - captionHeight) * 0.9;
-        int qrCenterY = textBottom + (HEIGHT - captionHeight - textBottom) / 2;
-        drawQRCode(githubRepoUrl, WIDTH / 2, qrCenterY, qrMaxSize, TFT_WHITE, TFT_BLACK);
+        int qrMaxSize = min((int)STATUS_WIDTH, (int)STATUS_HEIGHT - textBottom - captionHeight) * 0.9;
+        int qrCenterY = textBottom + (STATUS_HEIGHT - captionHeight - textBottom) / 2;
+        drawQRCode(githubRepoUrl, STATUS_WIDTH / 2, qrCenterY, qrMaxSize, TFT_WHITE, TFT_BLACK);
 
-        spr.setTextColor(TFT_DARKGREY, TFT_BLACK);
-        spr.drawString("Scan for setup help", WIDTH / 2, HEIGHT - 16, 2);
+        statusSpr.setTextColor(TFT_DARKGREY, TFT_BLACK);
+        statusSpr.drawString("Scan for setup help", STATUS_WIDTH / 2, STATUS_HEIGHT - 16, 2);
 
-        spr.setTextDatum(TL_DATUM);
-        amoled.pushColors(0, 0, WIDTH, HEIGHT, (uint16_t *)spr.getPointer());
+        statusSpr.setTextDatum(TL_DATUM);
+        amoled.pushColorsCompensated(STATUS_WIDTH, STATUS_HEIGHT, (uint16_t *)statusSpr.getPointer());
     }
 }
 
@@ -646,8 +663,19 @@ void setup()
         }
     }
 
+    // See webRAW.cpp's identical rotation-1 comment for the full story - only the
+    // 2.41" T4-S3 board (LILYGO_AMOLED_241) has the confirmed diagonal-tearing MADCTL
+    // issue at rotation 0, so this is scoped to that board only.
+    if (amoled.getBoardID() == LILYGO_AMOLED_241) {
+        amoled.setRotation(1);
+        statusScreenNeedsRotationFix = true;
+    }
+
     spr.createSprite(WIDTH, HEIGHT);
     spr.setSwapBytes(true);
+
+    statusSpr.createSprite(STATUS_WIDTH, STATUS_HEIGHT);
+    statusSpr.setSwapBytes(true);
 
     frameMutex = xSemaphoreCreateMutex();
 
@@ -663,15 +691,15 @@ void setup()
         }
     }
 
-    spr.fillSprite(TFT_BLACK);
-    spr.setTextColor(TFT_WHITE, TFT_BLACK);
-    spr.setTextDatum(TC_DATUM);
-    spr.drawString("webJPEG", WIDTH/2, HEIGHT/2 - 20, 2);
-    spr.drawString("Starting...", WIDTH/2, HEIGHT/2 + 10, 2);
-    spr.setTextColor(TFT_DARKGREY, TFT_BLACK);
-    spr.drawString(buildDateString(), WIDTH/2, HEIGHT/2 + 30, 1);
-    spr.setTextDatum(TL_DATUM);
-    amoled.pushColors(0, 0, WIDTH, HEIGHT, (uint16_t *)spr.getPointer());
+    statusSpr.fillSprite(TFT_BLACK);
+    statusSpr.setTextColor(TFT_WHITE, TFT_BLACK);
+    statusSpr.setTextDatum(TC_DATUM);
+    statusSpr.drawString("webJPEG", STATUS_WIDTH/2, STATUS_HEIGHT/2 - 20, 2);
+    statusSpr.drawString("Starting...", STATUS_WIDTH/2, STATUS_HEIGHT/2 + 10, 2);
+    statusSpr.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    statusSpr.drawString(buildDateString(), STATUS_WIDTH/2, STATUS_HEIGHT/2 + 30, 1);
+    statusSpr.setTextDatum(TL_DATUM);
+    amoled.pushColorsCompensated(STATUS_WIDTH, STATUS_HEIGHT, (uint16_t *)statusSpr.getPointer());
     delay(1000);
 
     setupWiFi();

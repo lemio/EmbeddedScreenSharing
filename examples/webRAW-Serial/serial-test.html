@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>webRAW-Serial transport test</title>
+<style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; color: #eee; background: #1a1a1a; }
+    h1 { font-size: 1.3em; }
+    label { display: block; margin-top: 12px; font-size: 0.9em; color: #aaa; }
+    input, button { font-size: 1em; padding: 6px 10px; margin-top: 4px; }
+    input[type=text], input[type=number] { width: 100%; box-sizing: border-box; background: #222; color: #eee; border: 1px solid #444; }
+    button { margin-top: 16px; margin-right: 8px; cursor: pointer; }
+    #status { margin-top: 16px; padding: 10px; background: #222; border-radius: 4px; white-space: pre-wrap; font-family: monospace; font-size: 0.85em; max-height: 300px; overflow-y: auto; }
+    .warn { color: #f2c744; }
+    .err { color: #f25c54; }
+    .ok { color: #6bcf7f; }
+    .row { display: flex; gap: 12px; }
+    .row > div { flex: 1; }
+</style>
+</head>
+<body>
+
+<h1>webRAW-Serial - isolated transport prototype</h1>
+<p>
+    Standalone test page for the Web Serial transport experiment - see
+    <code>webRAW-Serial.cpp</code>'s file header for the full reasoning. Not part of
+    the shared <code>stream.html</code>. Writes <code>[4-byte sync marker][4-byte LE
+    compressed length][raw deflate bytes]</code> per frame directly over USB Serial
+    and waits for a single ack byte back before sending the next - no WiFi, no
+    AsyncTCP, board must stay plugged into this computer for the whole session. The
+    sync marker lets the device recover deterministically if byte-stream alignment
+    is ever lost (e.g. a previous session ending mid-frame) instead of guessing.
+</p>
+
+<div class="row">
+    <div>
+        <label>Board width (must match your specific AMOLED panel - see below)</label>
+        <input type="number" id="boardWidth" value="450">
+    </div>
+    <div>
+        <label>Board height</label>
+        <input type="number" id="boardHeight" value="600">
+    </div>
+</div>
+<p style="font-size: 0.85em; color: #aaa;">
+    This prototype has no WiFi, so there's no <code>/boardinfo</code> endpoint for this
+    page to read the panel's real size from the way <code>stream.html</code> does -
+    these two fields must be set by hand and exactly match the device's actual
+    <code>WIDTH</code>/<code>HEIGHT</code>. Getting the total pixel count right but the
+    width/height <em>swapped</em> (e.g. 600x450 instead of 450x600) won't error out -
+    decompression will still produce the right number of bytes - but every row gets
+    sliced at the wrong offset, scrambling the image instead of failing cleanly. On the
+    2.41" T4-S3 specifically, the device runs in portrait (450x600), not its native
+    landscape (600x450) - see <code>webRAW-Serial.cpp</code>'s <code>setRotation(1)</code>
+    comment for why (a display-tearing fix, unrelated to this page). The 1.47"/1.91"
+    boards don't have that rotation applied and use their native landscape dimensions.
+</p>
+
+<label>Ack timeout (ms) - give up and skip a frame if no ack byte arrives</label>
+<input type="number" id="ackTimeout" value="2000" min="200">
+
+<div>
+    <button id="connectBtn">Connect device (Web Serial)</button>
+    <button id="startBtn" disabled>Start streaming</button>
+    <button id="stopBtn" disabled>Stop</button>
+</div>
+
+<div id="status">Idle. Click "Connect device" first - this is the same one-time
+port-selection prompt this project's own browser flasher uses.</div>
+
+<script>
+const boardWidthInput = document.getElementById('boardWidth');
+const boardHeightInput = document.getElementById('boardHeight');
+const ackTimeoutInput = document.getElementById('ackTimeout');
+const connectBtn = document.getElementById('connectBtn');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const statusEl = document.getElementById('status');
+
+let port = null;
+let writer = null;
+let reader = null;
+let streaming = false;
+
+let video = document.createElement('video');
+let canvas = document.createElement('canvas');
+let ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+let frameCount = 0;
+let droppedCount = 0;
+let lastLogTime = 0;
+
+function log(msg, cls) {
+    const line = document.createElement('div');
+    if (cls) line.className = cls;
+    line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    statusEl.appendChild(line);
+    statusEl.scrollTop = statusEl.scrollHeight;
+    while (statusEl.childNodes.length > 500) statusEl.removeChild(statusEl.firstChild);
+}
+
+function packRGB565(imageData) {
+    const { data, width, height } = imageData;
+    const out = new Uint16Array(width * height);
+    for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+        const r = data[i], g = data[i + 1], b = data[i + 2];
+        out[p] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+    }
+    return out;
+}
+
+async function deflateRaw(bytes) {
+    const cs = new CompressionStream('deflate-raw');
+    const w = cs.writable.getWriter();
+    w.write(bytes);
+    w.close();
+    const r = cs.readable.getReader();
+    const chunks = [];
+    let total = 0;
+    while (true) {
+        const { done, value } = await r.read();
+        if (done) break;
+        chunks.push(value);
+        total += value.byteLength;
+    }
+    const result = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.byteLength; }
+    return result;
+}
+
+// Waits for a genuine ack byte (0x61, 'a') from the device, discarding (and
+// logging) anything else that arrives first. The device's own human-readable
+// diagnostic log lines (LOGF/LOGLN in webRAW-Serial.cpp) share this same serial
+// stream, with no separate channel - real-hardware testing found the original
+// version of this function (which just resolved on ANY successful reader.read(),
+// never checking its content) treated a multi-byte log line exactly like a valid
+// ack. That let a device stuck in a desync loop (spewing "SERIAL: declared frame
+// size ... exceeds buffer" errors instead of ever acking) look like it was
+// successfully acking every single frame from this page's perspective, while it
+// was actually never rendering anything - "frames sent" climbing steadily with
+// zero drops, but nothing ever reaching the display. Log lines always start with
+// '[' and end with '\n' (see LOGF/LOGLN); the real ack is a single standalone
+// byte with no framing at all - reader.read() can hand back either shape (or a
+// chunk spanning parts of both) in one call, so this keeps reading and scanning
+// until it finds a real ack byte outside of a log line, or the overall timeout
+// (not per-read) expires.
+async function waitForAck(timeoutMs) {
+    const deadline = performance.now() + timeoutMs;
+    let inLogLine = false;
+    let lineBuf = '';
+    while (true) {
+        const remaining = deadline - performance.now();
+        if (remaining <= 0) throw new Error('ack timeout');
+        const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('ack timeout')), remaining));
+        const readOne = (async () => {
+            const { value, done } = await reader.read();
+            if (done) throw new Error('port closed');
+            return value;
+        })();
+        const chunk = await Promise.race([readOne, timeout]);
+        for (let i = 0; i < chunk.length; i++) {
+            const byte = chunk[i];
+            if (!inLogLine) {
+                if (byte === 0x61) { // 'a' - genuine ack
+                    return;
+                } else if (byte === 0x5B) { // '[' - start of a device log line
+                    inLogLine = true;
+                    lineBuf = '[';
+                }
+                // else: stray byte (e.g. leftover from a previous partial read), ignore
+            } else {
+                lineBuf += String.fromCharCode(byte);
+                if (byte === 0x0A) { // '\n' - end of the log line
+                    log(`DEVICE: ${lineBuf.trim()}`, 'warn');
+                    inLogLine = false;
+                    lineBuf = '';
+                }
+            }
+        }
+    }
+}
+
+async function connectDevice() {
+    try {
+        port = await navigator.serial.requestPort();
+        await port.open({ baudRate: 115200 });
+        writer = port.writable.getWriter();
+        reader = port.readable.getReader();
+        log('Connected to device over Web Serial.', 'ok');
+        startBtn.disabled = false;
+        connectBtn.disabled = true;
+    } catch (err) {
+        log(`Connect failed: ${err.message}`, 'err');
+    }
+}
+
+// Must match webRAW-Serial.cpp's FRAME_MAGIC exactly - see that file's header
+// comment for why this exists (lets the device deterministically find a genuine
+// frame boundary even if byte-stream alignment is ever lost, instead of guessing
+// - a real, confirmed-on-hardware failure mode of the original bare length-prefix
+// protocol).
+const FRAME_MAGIC = new Uint8Array([0xAA, 0x55, 0xAA, 0x55]);
+
+async function sendFrame(width, height) {
+    const pixels = packRGB565(ctx.getImageData(0, 0, width, height));
+    const compressed = await deflateRaw(new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength));
+
+    const message = new Uint8Array(4 + 4 + compressed.byteLength);
+    message.set(FRAME_MAGIC, 0);
+    new DataView(message.buffer).setUint32(4, compressed.byteLength, true);
+    message.set(compressed, 8);
+
+    const startedAt = performance.now();
+    await writer.write(message);
+
+    const ackTimeout = Math.max(200, parseInt(ackTimeoutInput.value) || 2000);
+    try {
+        await waitForAck(ackTimeout);
+        frameCount++;
+    } catch (err) {
+        droppedCount++;
+        log(`No ack (${err.message}) - continuing`, 'warn');
+    }
+
+    const rtt = (performance.now() - startedAt).toFixed(0);
+    const now = performance.now();
+    if (now - lastLogTime > 5000) {
+        log(`Sent ${frameCount}, dropped/timed-out ${droppedCount}, last rtt=${rtt}ms`, 'ok');
+        lastLogTime = now;
+    }
+}
+
+async function streamLoop(width, height) {
+    while (streaming) {
+        try {
+            await sendFrame(width, height);
+        } catch (err) {
+            log(`sendFrame error: ${err.message}`, 'err');
+            streaming = false;
+            break;
+        }
+    }
+}
+
+startBtn.addEventListener('click', async () => {
+    const width = parseInt(boardWidthInput.value) || 240;
+    const height = parseInt(boardHeightInput.value) || 536;
+
+    const mediaStream = await navigator.mediaDevices.getDisplayMedia({
+        video: { width: { ideal: width }, height: { ideal: height } },
+        audio: false
+    });
+    video.srcObject = mediaStream;
+    await video.play();
+
+    canvas.width = width;
+    canvas.height = height;
+
+    streaming = true;
+    frameCount = 0;
+    droppedCount = 0;
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+
+    function drawTick() {
+        if (!streaming) return;
+        ctx.drawImage(video, 0, 0, width, height);
+        requestAnimationFrame(drawTick);
+    }
+    drawTick();
+
+    streamLoop(width, height);
+
+    mediaStream.getVideoTracks()[0].addEventListener('ended', () => {
+        log('Screen share ended by user');
+        stopBtn.click();
+    });
+});
+
+stopBtn.addEventListener('click', () => {
+    streaming = false;
+    if (video.srcObject) {
+        video.srcObject.getTracks().forEach(t => t.stop());
+        video.srcObject = null;
+    }
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    log(`Stopped. Total: sent ${frameCount}, dropped/timed-out ${droppedCount}.`);
+});
+
+connectBtn.addEventListener('click', connectDevice);
+
+if (!('serial' in navigator)) {
+    log('Web Serial API not available - use Chrome or Edge.', 'err');
+    connectBtn.disabled = true;
+}
+if (!window.isSecureContext) {
+    log('This page is not in a secure context (needs https:// or localhost) - getDisplayMedia will fail.', 'err');
+}
+</script>
+</body>
+</html>

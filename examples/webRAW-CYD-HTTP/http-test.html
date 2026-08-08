@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>webRAW-CYD-HTTP transport test</title>
+<style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; color: #eee; background: #1a1a1a; }
+    h1 { font-size: 1.3em; }
+    label { display: block; margin-top: 12px; font-size: 0.9em; color: #aaa; }
+    input, button { font-size: 1em; padding: 6px 10px; margin-top: 4px; }
+    input[type=text], input[type=number] { width: 100%; box-sizing: border-box; background: #222; color: #eee; border: 1px solid #444; }
+    button { margin-top: 16px; margin-right: 8px; cursor: pointer; }
+    #status { margin-top: 16px; padding: 10px; background: #222; border-radius: 4px; white-space: pre-wrap; font-family: monospace; font-size: 0.85em; max-height: 300px; overflow-y: auto; }
+    .warn { color: #f2c744; }
+    .err { color: #f25c54; }
+    .ok { color: #6bcf7f; }
+</style>
+</head>
+<body>
+
+<h1>webRAW-CYD-HTTP - isolated transport prototype</h1>
+<p>
+    Standalone test page for the HTTP-POST-per-frame transport experiment - see
+    <code>webRAW-CYD-HTTP.cpp</code>'s file header for the full reasoning. Not part of
+    the shared <code>stream.html</code>. POSTs the same strip-based deflate wire format
+    <code>webRAW-CYD.cpp</code> already uses to <code>/frame</code> as an
+    <code>application/octet-stream</code> body; the HTTP response is the ack.
+</p>
+
+<label>ESP32 address (e.g. http://esp-screen.local or http://192.168.1.50)</label>
+<input type="text" id="espAddress" placeholder="http://esp-screen.local">
+
+<label>Target frame interval (ms) - floor between sends, not a guarantee</label>
+<input type="number" id="frameInterval" value="150" min="20">
+
+<div>
+    <button id="startBtn">Start</button>
+    <button id="stopBtn" disabled>Stop</button>
+</div>
+
+<div id="status">Idle.</div>
+
+<script>
+const espAddressInput = document.getElementById('espAddress');
+const frameIntervalInput = document.getElementById('frameInterval');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const statusEl = document.getElementById('status');
+
+let streaming = false;
+let video = document.createElement('video');
+let canvas = document.createElement('canvas');
+let ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+// Device-reported values, filled in from /boardinfo once connected.
+let boardWidth = 320;
+let boardHeight = 240;
+let stripRows = 24;
+let maxFrameSize = 48 * 1024;
+
+let frameCount = 0;
+let droppedCount = 0;
+let lastLogTime = 0;
+
+function log(msg, cls) {
+    const line = document.createElement('div');
+    if (cls) line.className = cls;
+    line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    statusEl.appendChild(line);
+    statusEl.scrollTop = statusEl.scrollHeight;
+    // Keep the log from growing forever during a long soak test.
+    while (statusEl.childNodes.length > 500) statusEl.removeChild(statusEl.firstChild);
+}
+
+// Same packing formula used everywhere else in this repo - see stream.html.
+function packRGB565(imageData) {
+    const { data, width, height } = imageData;
+    const out = new Uint16Array(width * height);
+    for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+        const r = data[i], g = data[i + 1], b = data[i + 2];
+        out[p] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+    }
+    return out;
+}
+
+// Identical to stream.html's deflateRaw() - standalone raw deflate stream, no
+// zlib/gzip header, matching the device's tinfl_decompress_mem_to_mem(flags=0).
+async function deflateRaw(bytes) {
+    const cs = new CompressionStream('deflate-raw');
+    const writer = cs.writable.getWriter();
+    writer.write(bytes);
+    writer.close();
+    const reader = cs.readable.getReader();
+    const chunks = [];
+    let total = 0;
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        total += value.byteLength;
+    }
+    const result = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.byteLength; }
+    return result;
+}
+
+async function fetchBoardInfo(espAddress) {
+    const resp = await fetch(espAddress + '/boardinfo');
+    if (!resp.ok) throw new Error(`/boardinfo returned ${resp.status}`);
+    return resp.json();
+}
+
+async function sendFrame(espAddress) {
+    const pixels = packRGB565(ctx.getImageData(0, 0, boardWidth, boardHeight));
+
+    const parts = [];
+    let totalLen = 0;
+    for (let y = 0; y < boardHeight; y += stripRows) {
+        const stripPixels = pixels.subarray(y * boardWidth, (y + stripRows) * boardWidth);
+        const compressed = await deflateRaw(new Uint8Array(stripPixels.buffer, stripPixels.byteOffset, stripPixels.byteLength));
+        const lenPrefix = new Uint8Array(4);
+        new DataView(lenPrefix.buffer).setUint32(0, compressed.byteLength, true);
+        parts.push(lenPrefix, compressed);
+        totalLen += 4 + compressed.byteLength;
+    }
+
+    const message = new Uint8Array(totalLen);
+    let off = 0;
+    for (const part of parts) { message.set(part, off); off += part.byteLength; }
+
+    if (message.byteLength > maxFrameSize) {
+        droppedCount++;
+        log(`Frame too large (${message.byteLength} > ${maxFrameSize}), dropped client-side`, 'warn');
+        return;
+    }
+
+    const startedAt = performance.now();
+    const resp = await fetch(espAddress + '/frame', {
+        method: 'POST',
+        // Must NOT be x-www-form-urlencoded or text/plain - ESPAsyncWebServer's body
+        // parser treats those as form params and never calls the raw body handler.
+        // See webRAW-CYD-HTTP.cpp's file header for the full explanation.
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: message
+    });
+    const rtt = (performance.now() - startedAt).toFixed(0);
+
+    if (resp.status === 200) {
+        frameCount++;
+    } else if (resp.status === 503) {
+        droppedCount++;
+        log(`Device busy (503), rtt=${rtt}ms`, 'warn');
+    } else {
+        droppedCount++;
+        log(`Unexpected response ${resp.status}, rtt=${rtt}ms`, 'err');
+    }
+
+    const now = performance.now();
+    if (now - lastLogTime > 5000) {
+        log(`Sent ${frameCount}, dropped ${droppedCount}, last rtt=${rtt}ms`, 'ok');
+        lastLogTime = now;
+    }
+}
+
+async function streamLoop(espAddress) {
+    const interval = Math.max(20, parseInt(frameIntervalInput.value) || 150);
+    while (streaming) {
+        const start = performance.now();
+        try {
+            await sendFrame(espAddress);
+        } catch (err) {
+            log(`sendFrame error: ${err.message}`, 'err');
+        }
+        const elapsed = performance.now() - start;
+        const wait = Math.max(0, interval - elapsed);
+        await new Promise(r => setTimeout(r, wait));
+    }
+}
+
+startBtn.addEventListener('click', async () => {
+    const espAddress = espAddressInput.value.trim().replace(/\/$/, '');
+    if (!espAddress) {
+        log('Enter the ESP32 address first', 'err');
+        return;
+    }
+
+    try {
+        const info = await fetchBoardInfo(espAddress);
+        boardWidth = info.width;
+        boardHeight = info.height;
+        stripRows = info.stripRows;
+        maxFrameSize = info.maxFrameSize;
+        log(`Connected: ${info.name} (${boardWidth}x${boardHeight}, stripRows=${stripRows}, maxFrameSize=${maxFrameSize})`, 'ok');
+    } catch (err) {
+        log(`Failed to reach /boardinfo: ${err.message}`, 'err');
+        return;
+    }
+
+    const mediaStream = await navigator.mediaDevices.getDisplayMedia({
+        video: { width: { ideal: boardWidth }, height: { ideal: boardHeight } },
+        audio: false
+    });
+    video.srcObject = mediaStream;
+    await video.play();
+
+    canvas.width = boardWidth;
+    canvas.height = boardHeight;
+
+    streaming = true;
+    frameCount = 0;
+    droppedCount = 0;
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+
+    // Draw loop, independent of the send loop - always sends whatever's currently
+    // on the canvas rather than trying to synchronize the two.
+    function drawTick() {
+        if (!streaming) return;
+        ctx.drawImage(video, 0, 0, boardWidth, boardHeight);
+        requestAnimationFrame(drawTick);
+    }
+    drawTick();
+
+    streamLoop(espAddress);
+
+    mediaStream.getVideoTracks()[0].addEventListener('ended', () => {
+        log('Screen share ended by user');
+        stopBtn.click();
+    });
+});
+
+stopBtn.addEventListener('click', () => {
+    streaming = false;
+    if (video.srcObject) {
+        video.srcObject.getTracks().forEach(t => t.stop());
+        video.srcObject = null;
+    }
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    log(`Stopped. Total: sent ${frameCount}, dropped ${droppedCount}.`);
+});
+
+if (!window.isSecureContext) {
+    log('This page is not in a secure context (needs https:// or localhost) - getDisplayMedia will fail.', 'err');
+}
+</script>
+</body>
+</html>

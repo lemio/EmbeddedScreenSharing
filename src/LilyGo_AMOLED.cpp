@@ -942,8 +942,81 @@ void LilyGo_AMOLED::pushColors(uint16_t *data, uint32_t len)
     clrCS();
 }
 
+// See the header comment for why this exists. Rotates designWidth x designHeight
+// data 90 degrees clockwise into a lazily-grown PSRAM scratch buffer whenever the
+// current orientation doesn't already match it, then pushes at the current, actual
+// width()/height(). Standard image-rotation identity for a W x H source becoming an
+// H x W destination: dest(row2, col2) = src(H-1-col2, row2), row2 in [0,W), col2 in
+// [0,H) - see this function's own inline derivation if that's not immediately
+// obvious from the code alone.
+void LilyGo_AMOLED::pushColorsCompensated(uint16_t designWidth, uint16_t designHeight, uint16_t *data)
+{
+    if (designWidth == _width && designHeight == _height) {
+        pushColors(0, 0, designWidth, designHeight, data);
+        return;
+    }
+
+    static uint16_t *scratch = nullptr;
+    static size_t scratchPixels = 0;
+    size_t neededPixels = (size_t)designWidth * (size_t)designHeight;
+    if (!scratch || scratchPixels < neededPixels) {
+        if (scratch) {
+            free(scratch);
+        }
+        scratch = (uint16_t *)ps_malloc(neededPixels * sizeof(uint16_t));
+        scratchPixels = scratch ? neededPixels : 0;
+    }
+    if (!scratch) {
+        return;
+    }
+
+    for (uint16_t row2 = 0; row2 < designWidth; row2++) {
+        for (uint16_t col2 = 0; col2 < designHeight; col2++) {
+            scratch[row2 * designHeight + col2] = data[(designHeight - 1 - col2) * designWidth + row2];
+        }
+    }
+    pushColors(0, 0, designHeight, designWidth, scratch);
+}
+
+void LilyGo_AMOLED::setTearingEffectSync(bool enable, uint32_t timeoutMs)
+{
+    _teSyncEnabled = enable;
+    _teSyncTimeoutMs = timeoutMs;
+}
+
+// Waits for a rising edge on boards->display.te (the panel's Tearing-Effect output,
+// asserted around the start of its internal vblank - see initSequence.cpp's "TE ON"
+// DCS command) so the caller's upcoming RAMWR burst starts right after a refresh
+// finishes instead of overlapping it. Two-phase (drain any in-progress HIGH pulse
+// first, then wait for the next LOW->HIGH edge) so a call landing mid-pulse still
+// catches a real edge rather than the tail of the current one. Bounded by
+// _teSyncTimeoutMs throughout - if TE never toggles as expected on some board/
+// polarity, this gives up and returns false rather than hanging rendering forever.
+bool LilyGo_AMOLED::waitForTearingEffect()
+{
+    int tePin = boards->display.te;
+    if (tePin == -1) {
+        return false;
+    }
+    uint32_t start = millis();
+    while (digitalRead(tePin) == HIGH) {
+        if (millis() - start > _teSyncTimeoutMs) {
+            return false;
+        }
+    }
+    while (digitalRead(tePin) == LOW) {
+        if (millis() - start > _teSyncTimeoutMs) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void LilyGo_AMOLED::pushColors(uint16_t x, uint16_t y, uint16_t width, uint16_t hight, uint16_t *data)
 {
+    if (_teSyncEnabled) {
+        waitForTearingEffect();
+    }
 
     if (boards->display.frameBufferSize) {
         assert(pBuffer);

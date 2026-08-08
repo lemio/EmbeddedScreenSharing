@@ -153,6 +153,17 @@ volatile uint32_t lastDataActivityMs = 0;
 // are actually still connected, so there's no pointer of ours to go stale.
 static const uint32_t ACK_NUDGE_INTERVAL_MS = 2000;
 
+// True from the first byte of a WS message until its ack has actually been sent -
+// see webRAW.cpp's identical flag/comment for the full story: acking immediately on
+// receipt (the original design here) let a waiting client outrun the ~51ms render
+// pipeline, since a send+ack round trip only cost the ~6ms Recv stage - confirmed on
+// real hardware as a stable ~72% drop rate across ten repeated runs despite
+// "waiting" the whole time. Also gates the ACK_NUDGE resend just below, for the
+// same reason as webRAW.cpp's identical guard - without it, a nudge firing mid-
+// stream can let the client jump ahead of a still-rendering frame, reintroducing
+// the same bug conditionally instead of continuously.
+volatile bool frameInFlight = false;
+
 // Same hardcoded-not-tft.width() reasoning as webJPEG-CYD.cpp - see that file's
 // comment above its own WIDTH/HEIGHT and learnings.md item 6.
 #define WIDTH  320
@@ -417,6 +428,10 @@ void setupWebServer() {
             LOGF("WebSocket client #%u disconnected\n", client->id());
             wsAssemblySize = 0;
             wsExpectedSize = 0;
+            // Safety reset - see frameInFlight's declaration comment. Mirrors
+            // webRAW.cpp's identical reset for a message caught mid-reassembly when
+            // the client disconnects.
+            frameInFlight = false;
         } else if (type == WS_EVT_DATA) {
             AwsFrameInfo *info = (AwsFrameInfo*)arg;
 
@@ -433,6 +448,7 @@ void setupWebServer() {
                 wsExpectedSize = info->len;
                 wsAssemblySize = 0;
                 wsRecvStartMs = millis();
+                frameInFlight = true;
             }
 
             if (info->index + len > wsExpectedSize || info->index + len > MAX_FRAME_SIZE) {
@@ -466,24 +482,31 @@ void setupWebServer() {
                 frameRecvTimestamp = wsRecvStartMs;
 
                 xSemaphoreGive(frameMutex);
+                // No ack here anymore - see loop()'s ack-after-render for why (moved
+                // there so "wait mode" backpressures against actual render time, not
+                // just network time - see frameInFlight's declaration comment).
             } else {
                 LOGF("Mutex busy - frame dropped (Recv=%lums)\n", (uint32_t)(millis() - wsRecvStartMs));
-            }
-
-            // See webJPEG.cpp's identical comment - tiny flow-control ack, acted on
-            // only when stream.html's Ack Mode is "wait". Guarded by status(), unlike
-            // the unconditional version this used to be: confirmed on real hardware
-            // that a client can still have a WS_EVT_DATA callback in flight (already
-            // queued/dispatching on the async task) right as the same connection's
-            // disconnect is processed - calling client->text() on it then walks into
-            // AsyncWebSocketClient::_queueMessage()'s mutex lock on a torn-down object
-            // and hard-crashes (LoadProhibited deep in _queueMessage's recursive_mutex
-            // lock - see learnings.md for the full backtrace). status() is a plain
-            // field read, not a queue/mutex operation, so it's safe to check even this
-            // late - AsyncWebSocketClient::_onDisconnect() sets WS_DISCONNECTED before
-            // tearing anything else down.
-            if (client->status() == WS_CONNECTED) {
-                client->text("a");
+                // Still ack a dropped frame - see webRAW.cpp's identical comment on
+                // its own mutex-busy branch for why (mainly for Ack Mode "immediate",
+                // which ignores acks anyway but shouldn't be left permanently stalled
+                // by this code path either).
+                //
+                // Guarded by status(): confirmed on real hardware that a client can
+                // still have a WS_EVT_DATA callback in flight (already queued/
+                // dispatching on the async task) right as the same connection's
+                // disconnect is processed - calling client->text() on it then walks
+                // into AsyncWebSocketClient::_queueMessage()'s mutex lock on a torn-
+                // down object and hard-crashes (LoadProhibited deep in
+                // _queueMessage's recursive_mutex lock - see learnings.md for the
+                // full backtrace). status() is a plain field read, not a queue/mutex
+                // operation, so it's safe to check even this late -
+                // AsyncWebSocketClient::_onDisconnect() sets WS_DISCONNECTED before
+                // tearing anything else down.
+                if (client->status() == WS_CONNECTED) {
+                    client->text("a");
+                }
+                frameInFlight = false;
             }
         }
     });
@@ -620,6 +643,14 @@ void loop()
 
             newFrameAvailable = false;
             xSemaphoreGive(frameMutex);
+
+            // Ack now that the frame has actually been rendered - see
+            // WS_EVT_DATA's comment above for why this moved here from the
+            // WS event handler. ws.textAll() rather than a cached client
+            // pointer, for the same cross-task-safety reason as the
+            // ACK_NUDGE mechanism below (see its comment).
+            ws.textAll("a");
+            frameInFlight = false;
         }
     }
 
@@ -631,7 +662,11 @@ void loop()
         lastCheck = now;
     }
 
-    if (ws.count() > 0 && (now - lastDataActivityMs > ACK_NUDGE_INTERVAL_MS)) {
+    // Gated on !frameInFlight - see that flag's comment for why: this must only
+    // ever fire when nothing is genuinely still being reassembled or awaiting its
+    // render-ack, or it reintroduces a premature, render-independent ack exactly
+    // like the bug the ack-after-render fix above was meant to eliminate.
+    if (ws.count() > 0 && !frameInFlight && (now - lastDataActivityMs > ACK_NUDGE_INTERVAL_MS)) {
         ws.textAll("a");
         lastDataActivityMs = now;
         LOGLN("RAW: no data received in a while - resending ack in case the last one was lost/delayed");

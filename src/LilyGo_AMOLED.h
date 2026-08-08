@@ -213,7 +213,18 @@ static const DisplayConfigure_t RM690B0_AMOLED  = {
     18, //BOARD_DISP_TE,
     8, //command bit
     24,//address bit
-    36000000,
+    // Experimental bump from the original 36000000 - real-hardware testing found
+    // TE-sync alone (see LilyGo_AMOLED::setTearingEffectSync()) didn't fully clear
+    // visible tearing on webRAW's full-frame pushColors(), most likely because the
+    // write itself takes longer than the panel's own refresh cycle, so it always
+    // bleeds into a subsequent scan-out regardless of when it starts. RM67162
+    // (a different panel, same ESP32-S3 QSPI peripheral/framework) already runs at
+    // 75000000 below, showing real headroom exists on this hardware in general -
+    // 60000000 is a first empirical step, not a datasheet-verified max for this
+    // specific chip. Affects every example using this board, not just webRAW - if
+    // this causes visible corruption/glitching (as opposed to less tearing), revert
+    // to 36000000.
+    60000000,
     (lcd_cmd_t *)rm690b0_cmd,
     RM690B0_INIT_SEQUENCE_LENGTH,
     RM690B0_WIDTH,//width
@@ -355,6 +366,41 @@ public:
     void pushColors(uint16_t x, uint16_t y, uint16_t width, uint16_t hight, uint16_t *data);
 
     /**
+     * @brief   Pushes a full-screen buffer drawn in "design" (landscape) orientation,
+     *          transposing it to match the panel's *actual current* rotation if that
+     *          rotation doesn't already match designWidth x designHeight - see
+     *          setRotation()'s LILYGO_AMOLED_241 default-vs-1 MADCTL cases for why this
+     *          exists: rotation 1 avoids the MV bit that was causing visible diagonal
+     *          tearing on full-frame video pushes there, but its native buffer is
+     *          swapped (portrait) relative to the panel's physical landscape mounting.
+     *          Video content compensates for this browser-side (the actual point of
+     *          switching rotation - see webRAW.cpp); this method exists for firmware-
+     *          drawn content (WiFi/QR/status screens) that has no browser to do that
+     *          for it. No-op transpose (just a plain pushColors passthrough) whenever
+     *          designWidth/designHeight already match the current orientation - safe
+     *          to call unconditionally regardless of board/rotation.
+     * @param  designWidth, designHeight: the buffer's own width/height as drawn (e.g.
+     *          the board's native landscape dimensions), not necessarily this->width()/
+     *          height() if the current rotation is a swapped one
+     * @param  data: designWidth x designHeight pixels, row-major, same RGB565 format
+     *          pushColors() always expects
+     */
+    void pushColorsCompensated(uint16_t designWidth, uint16_t designHeight, uint16_t *data);
+
+    /**
+     * @brief   Opt-in experimental Tearing-Effect sync: when enabled, pushColors(x,y,w,h,data)
+     *          waits for a rising edge on the panel's TE pin (if this board has one wired -
+     *          see DisplayConfigure_t::te) before starting the RAMWR burst, so the write lands
+     *          right after the panel's own internal refresh finishes instead of racing it.
+     *          Defaults to disabled (matches every example's existing behavior unchanged);
+     *          no-op on boards with no TE pin (te == -1). See webRAW.cpp for the first caller.
+     * @param  enable: true to wait for TE before every pushColors(x,y,w,h,data) call
+     * @param  timeoutMs: give up and push anyway if no edge arrives within this long, so a
+     *          board where TE doesn't toggle as expected can't hang rendering forever
+     */
+    void setTearingEffectSync(bool enable, uint32_t timeoutMs = 50);
+
+    /**
      * @brief   Hang on SD card
      * @note   If the specified Pin is not passed in, the default Pin will be used as the SPI
      * @param  miso: 1.91 Inch [GPIO13] 1.47 Inch [GPIO47]    2.41 Inch defaults to onboard SD slot
@@ -441,6 +487,10 @@ private:
     bool _disableTouch;
 
     SPIClass *spiDev;
+
+    bool _teSyncEnabled = false;
+    uint32_t _teSyncTimeoutMs = 50;
+    bool waitForTearingEffect();
 };
 
 #ifndef LilyGo_Class

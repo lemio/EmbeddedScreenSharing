@@ -131,6 +131,15 @@ volatile uint8_t* frameBuffer = nullptr;
 volatile size_t frameSize = 0;
 volatile bool newFrameAvailable = false;
 volatile bool isMonochrome = false;
+
+// True from the first byte of a WS message until its ack has actually been sent -
+// see webRAW.cpp's identical flag/comment for the full story: acking immediately on
+// receipt (the original design here) let a waiting client outrun the ~160-200ms
+// render pipeline, since a send+ack round trip only cost the ~8-10ms Recv stage -
+// confirmed on real hardware as an ~90% drop rate despite "waiting" the whole time.
+// Shared across both /ws and /ws-mono, same as frameBuffer/frameMutex above - only
+// one frame is ever in flight across both endpoints at once by design.
+volatile bool frameInFlight = false;
 // See examples/webJPEG/webJPEG.cpp's identical field for what this is - ported as-is,
 // PSRAM-vs-not doesn't change this part of the design.
 volatile uint32_t frameRecvTimestamp = 0;
@@ -215,12 +224,23 @@ void drawJPEG(uint8_t *jpegData, size_t jpegSize, uint32_t recvStartMs) {
 
     uint32_t t3 = millis();
 
-    // Pushes each decoded MCU block straight to the display over SPI as it comes off
-    // the decoder - no intermediate sprite. See the file header comment for why this
-    // is the right trade on this board despite being the opposite of what
-    // examples/webJPEG/webJPEG.cpp does. taskYIELD() every 64 blocks gives the
-    // WiFi/TCP stack's own task a chance to run during this loop - see that file's
-    // identical comment and learnings.md for why that matters.
+    // Row-buffer optimization: MCUs decode in strict raster order (left-to-right,
+    // then down a row), so for the common directRender case (a "row" of MCUs always
+    // spans the full display width, no cropping) we can accumulate one MCU row - at
+    // most WIDTH x 16 ×2 bytes = 10KB, since 16 is the largest MCU height baseline
+    // JPEG uses (4:2:0 subsampling) - and push it as ONE SPI transaction instead of
+    // ~20 individual per-MCU ones. Real-hardware testing found the original
+    // one-push-per-MCU-block approach visibly "painted in" block by block over
+    // ~185ms - this cuts the push count roughly 20x, which should both speed up
+    // rendering (fewer, larger transactions) and make that visible tearing/build-up
+    // effect far less pronounced. The rare mismatched-size fallback (directRender ==
+    // false) keeps the original per-block push below instead, to avoid the added
+    // complexity of a partial-width row buffer on a path that already flickers.
+    static uint16_t rowBuffer[WIDTH * 16];
+    int16_t rowBufferY = -1;
+
+    // taskYIELD() every 64 blocks gives the WiFi/TCP stack's own task a chance to
+    // run during this loop - see webJPEG.cpp's identical comment and learnings.md.
     uint16_t mcuCount = 0;
     while (JpegDec.read()) {
         uint16_t *pImg = JpegDec.pImage;
@@ -249,7 +269,17 @@ void drawJPEG(uint8_t *jpegData, size_t jpegSize, uint32_t recvStartMs) {
 
         // tft.pushImage() byte-swaps internally (setSwapBytes(true) in setup()), so no
         // manual swap needed here - same as the sprite path on the AMOLED boards.
-        if (render_w != mcu_w || render_h != mcu_h) {
+        if (directRender) {
+            if (destY != rowBufferY) {
+                if (rowBufferY >= 0) {
+                    tft.pushImage(0, rowBufferY, WIDTH, mcu_h, rowBuffer);
+                }
+                rowBufferY = destY;
+            }
+            for (uint16_t row = 0; row < render_h; row++) {
+                memcpy(&rowBuffer[row * WIDTH + destX], &pImg[row * mcu_w], render_w * sizeof(uint16_t));
+            }
+        } else if (render_w != mcu_w || render_h != mcu_h) {
             uint16_t tempBuffer[render_w * render_h];
             for (uint16_t row = 0; row < render_h; row++) {
                 for (uint16_t col = 0; col < render_w; col++) {
@@ -265,10 +295,13 @@ void drawJPEG(uint8_t *jpegData, size_t jpegSize, uint32_t recvStartMs) {
             taskYIELD();
         }
     }
+    if (directRender && rowBufferY >= 0) {
+        tft.pushImage(0, rowBufferY, WIDTH, mcu_h, rowBuffer);
+    }
 
     uint32_t t4 = millis();
 
-    // No separate bulk push step - each block above already reached the display
+    // No separate bulk push step - each block/row above already reached the display
     // directly, so this stage is 0ms by construction. Kept in the log for the same
     // field layout as examples/webJPEG/webJPEG.cpp, so a serial log from this board
     // is directly comparable to one from an AMOLED board.
@@ -314,6 +347,11 @@ void drawMonoJPEG(uint8_t *jpegData, size_t jpegSize, uint32_t recvStartMs) {
 
     uint32_t t3 = millis();
 
+    // See drawJPEG()'s identical row-buffer comment for why this exists - same
+    // one-push-per-MCU-row optimization, mirrored here for the mono pipeline.
+    static uint16_t rowBufferMono[WIDTH * 16];
+    int16_t rowBufferMonoY = -1;
+
     uint16_t mcuCount = 0;
     while (JpegDec.read()) {
         uint16_t *pImg = JpegDec.pImage;
@@ -337,7 +375,17 @@ void drawMonoJPEG(uint8_t *jpegData, size_t jpegSize, uint32_t recvStartMs) {
             render_h = HEIGHT - destY;
         }
 
-        if (render_w != mcu_w || render_h != mcu_h) {
+        if (directRender) {
+            if (destY != rowBufferMonoY) {
+                if (rowBufferMonoY >= 0) {
+                    tft.pushImage(0, rowBufferMonoY, WIDTH, mcu_h, rowBufferMono);
+                }
+                rowBufferMonoY = destY;
+            }
+            for (uint16_t row = 0; row < render_h; row++) {
+                memcpy(&rowBufferMono[row * WIDTH + destX], &pImg[row * mcu_w], render_w * sizeof(uint16_t));
+            }
+        } else if (render_w != mcu_w || render_h != mcu_h) {
             uint16_t tempBuffer[render_w * render_h];
             for (uint16_t row = 0; row < render_h; row++) {
                 for (uint16_t col = 0; col < render_w; col++) {
@@ -352,6 +400,9 @@ void drawMonoJPEG(uint8_t *jpegData, size_t jpegSize, uint32_t recvStartMs) {
         if (++mcuCount % 64 == 0) {
             taskYIELD();
         }
+    }
+    if (directRender && rowBufferMonoY >= 0) {
+        tft.pushImage(0, rowBufferMonoY, WIDTH, mcu_h, rowBufferMono);
     }
 
     uint32_t t4 = millis();
@@ -532,6 +583,10 @@ void setupWebServer() {
             LOGF("WebSocket client #%u disconnected\n", client->id());
             wsAssemblySize = 0;
             wsExpectedSize = 0;
+            // Safety reset - see frameInFlight's declaration comment. Mirrors
+            // webRAW.cpp's identical reset for a message caught mid-reassembly when
+            // the client disconnects.
+            frameInFlight = false;
         } else if (type == WS_EVT_DATA) {
             AwsFrameInfo *info = (AwsFrameInfo*)arg;
 
@@ -548,6 +603,7 @@ void setupWebServer() {
                 wsExpectedSize = info->len;
                 wsAssemblySize = 0;
                 wsRecvStartMs = millis();
+                frameInFlight = true;
             }
 
             if (info->index + len > wsExpectedSize || info->index + len > MAX_FRAME_SIZE) {
@@ -573,22 +629,22 @@ void setupWebServer() {
                 frameRecvTimestamp = wsRecvStartMs;
 
                 xSemaphoreGive(frameMutex);
+                // No ack here anymore - see loop()'s ack-after-render for why (moved
+                // there so "wait mode" backpressures against actual render time, not
+                // just network time - see frameInFlight's declaration comment).
             } else {
                 LOGF("Mutex busy - frame dropped (Recv=%lums)\n", (uint32_t)(millis() - wsRecvStartMs));
-            }
-
-            // Tiny flow-control signal, same convention as webH264.cpp: any WS message
-            // back to the browser means "done with that frame, send another whenever
-            // you like" (whether the frame rendered or got dropped for the mutex) so
-            // the browser can pace itself to what the device can actually keep up with
-            // instead of firing blind at a fixed interval. Harmless to clients not
-            // using it - stream.html only acts on this when its Ack Mode option is set
-            // to wait for it (see that file). Guarded by status() - see
-            // webRAW-CYD.cpp's identical guard for the real hardware crash
-            // (LoadProhibited inside _queueMessage's mutex lock on a torn-down client)
-            // this closes.
-            if (client->status() == WS_CONNECTED) {
-                client->text("a");
+                // Still ack a dropped frame - see webRAW.cpp's identical comment on
+                // its own mutex-busy branch for why (mainly for Ack Mode "immediate",
+                // which ignores acks anyway but shouldn't be left permanently stalled
+                // by this code path either). Guarded by status() - see
+                // webRAW-CYD.cpp's identical guard for the real hardware crash
+                // (LoadProhibited inside _queueMessage's mutex lock on a torn-down
+                // client) this closes.
+                if (client->status() == WS_CONNECTED) {
+                    client->text("a");
+                }
+                frameInFlight = false;
             }
         }
     });
@@ -603,6 +659,7 @@ void setupWebServer() {
             LOGF("Mono WebSocket client #%u disconnected\n", client->id());
             wsMonoAssemblySize = 0;
             wsMonoExpectedSize = 0;
+            frameInFlight = false;
         } else if (type == WS_EVT_DATA) {
             AwsFrameInfo *info = (AwsFrameInfo*)arg;
 
@@ -619,6 +676,7 @@ void setupWebServer() {
                 wsMonoExpectedSize = info->len;
                 wsMonoAssemblySize = 0;
                 wsMonoRecvStartMs = millis();
+                frameInFlight = true;
             }
 
             if (info->index + len > wsMonoExpectedSize || info->index + len > MAX_FRAME_SIZE) {
@@ -644,13 +702,13 @@ void setupWebServer() {
                 frameRecvTimestamp = wsMonoRecvStartMs;
 
                 xSemaphoreGive(frameMutex);
+                // See the color handler's identical comment above.
             } else {
                 LOGF("Mono mutex busy - dropped (Recv=%lums)\n", (uint32_t)(millis() - wsMonoRecvStartMs));
-            }
-
-            // See the color handler's identical comment above.
-            if (client->status() == WS_CONNECTED) {
-                client->text("a");
+                if (client->status() == WS_CONNECTED) {
+                    client->text("a");
+                }
+                frameInFlight = false;
             }
         }
     });
@@ -736,6 +794,10 @@ void loop()
         uint32_t startTime = millis();
 
         if (xSemaphoreTake(frameMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+            // Captured before isMonochrome gets reset below, so the ack after
+            // xSemaphoreGive() still knows which endpoint's client(s) to notify
+            // regardless of which branch ran.
+            bool wasMono = isMonochrome;
 
             if (frameBuffer && frameSize > 0) {
                 uint8_t* bufPtr = (uint8_t*)frameBuffer;
@@ -758,6 +820,17 @@ void loop()
 
             newFrameAvailable = false;
             xSemaphoreGive(frameMutex);
+
+            // Ack now that the frame has actually been rendered - see WS_EVT_DATA's
+            // comment above for why this moved here from the WS event handlers.
+            // textAll() rather than a cached client pointer, for the same cross-
+            // task-safety reason as webRAW.cpp's ACK_NUDGE mechanism.
+            if (wasMono) {
+                wsMono.textAll("a");
+            } else {
+                ws.textAll("a");
+            }
+            frameInFlight = false;
         }
     }
 
