@@ -6,7 +6,7 @@
   "firmwares": {
     "webH264": {
       "name": "WebH264 Stream Display",
-      "description": "Streams a browser tab or window to the display over WiFi as video, using the same H.264 format as most streaming apps. Sharper image and lower WiFi usage than WebJPEG. Works on any AMOLED board (auto-detected). Built 2026-08-06.",
+      "description": "Streams a browser tab or window to the display over WiFi as video, using the same H.264 format as most streaming apps. Sharper image and lower WiFi usage than WebJPEG. Works on any AMOLED board (auto-detected). Built 2026-08-08.",
       "files": [
         {
           "path": "firmware/webH264/bootloader.bin",
@@ -71,7 +71,7 @@
     },
     "webJPEG": {
       "name": "WebJPEG Stream Display",
-      "description": "Streams a browser tab or screen share to the display over WiFi as a series of JPEG images. Simple and reliable. Works on any AMOLED board (auto-detected). Built 2026-08-06.",
+      "description": "Streams a browser tab or screen share to the display over WiFi as a series of JPEG images. Simple and reliable. Works on any AMOLED board (auto-detected). Built 2026-08-08.",
       "files": [
         {
           "path": "firmware/webJPEG/bootloader.bin",
@@ -135,7 +135,7 @@
     },
     "webJPEG-CYD": {
       "name": "WebJPEG Stream Display (CYD)",
-      "description": "Streams a browser tab or screen share to the display over WiFi as a series of JPEG images. Works on the cheap \"Cheap Yellow Display\" (CYD) board. Built 2026-08-06.",
+      "description": "Streams a browser tab or screen share to the display over WiFi as a series of JPEG images. Works on the cheap \"Cheap Yellow Display\" (CYD) board. Built 2026-08-08.",
       "files": [
         {
           "path": "firmware/webJPEG-CYD/bootloader.bin",
@@ -225,7 +225,7 @@
     },
     "webRAW": {
       "name": "WebRAW Stream Display",
-      "description": "Streams a browser tab, window, or screen share to the display over WiFi, pixel-perfect with no compression artifacts. Best for flat, low-color content like UI screens or text - fast-moving video updates less often. Works on any AMOLED board (auto-detected). Built 2026-08-06.",
+      "description": "Streams a browser tab, window, or screen share to the display over WiFi, pixel-perfect with no compression artifacts. Best for flat, low-color content like UI screens or text - fast-moving video updates less often. Works on any AMOLED board (auto-detected). Built 2026-08-08.",
       "files": [
         {
           "path": "firmware/webRAW/bootloader.bin",
@@ -289,7 +289,7 @@
     },
     "webRAW-CYD": {
       "name": "WebRAW Stream Display (CYD)",
-      "description": "Streams a browser tab, window, or screen share to the display over WiFi, pixel-perfect with no compression artifacts. Works on the cheap \"Cheap Yellow Display\" (CYD) board - the recommended pick there, since it renders 3-6x faster than WebJPEG-CYD by pushing whole strips of pixels at once instead of many small blocks. Built 2026-08-06.",
+      "description": "Streams a browser tab, window, or screen share to the display over WiFi, pixel-perfect with no compression artifacts. Works on the cheap \"Cheap Yellow Display\" (CYD) board - the recommended pick there, since it renders 3-6x faster than WebJPEG-CYD by pushing whole strips of pixels at once instead of many small blocks. Built 2026-08-08.",
       "files": [
         {
           "path": "firmware/webRAW-CYD/bootloader.bin",
@@ -372,6 +372,54 @@
       ],
       "sourceUrl": "https://github.com/lemio/EmbeddedScreenSharing/tree/main/examples/webRAW-CYD",
       "recommended": true
+    },
+    "webRAW-CYD-HTTP": {
+      "name": "webRAW-CYD-HTTP",
+      "description": " Built 2026-08-08.",
+      "files": [
+        {
+          "path": "firmware/webRAW-CYD-HTTP/bootloader.bin",
+          "offset": 4096
+        },
+        {
+          "path": "firmware/webRAW-CYD-HTTP/partitions.bin",
+          "offset": 32768
+        },
+        {
+          "path": "firmware/webRAW-CYD-HTTP/boot_app0.bin",
+          "offset": 57344
+        },
+        {
+          "path": "firmware/webRAW-CYD-HTTP/firmware.bin",
+          "offset": 65536
+        }
+      ],
+      "mcu": "esp32",
+      "hardware": "esp32dev"
+    },
+    "webRAW-Serial": {
+      "name": "webRAW-Serial",
+      "description": " Built 2026-08-08.",
+      "files": [
+        {
+          "path": "firmware/webRAW-Serial/bootloader.bin",
+          "offset": 0
+        },
+        {
+          "path": "firmware/webRAW-Serial/partitions.bin",
+          "offset": 32768
+        },
+        {
+          "path": "firmware/webRAW-Serial/boot_app0.bin",
+          "offset": 57344
+        },
+        {
+          "path": "firmware/webRAW-Serial/firmware.bin",
+          "offset": 65536
+        }
+      ],
+      "mcu": "esp32s3",
+      "hardware": "T-Display-AMOLED"
     }
   }
 }
